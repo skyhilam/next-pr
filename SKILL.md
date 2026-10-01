@@ -41,12 +41,15 @@ Do not run `/implement` inside a subagent (subagents cannot spawn subagents). Ne
 
 ```
 next-pr/
-├── SKILL.md
-├── references/code-review.md   # read when spawning a reviewer
+├── SKILL.md                 # agent instructions (English)
+├── SKILL.zh-Hant.md         # human-readable Traditional Chinese
+├── references/code-review.md
 └── scripts/
-    ├── open-pr.sh              # worktree + branch + draft PR
-    └── check-pr.sh             # Observe: PR / head / CI JSON
+    ├── open-pr.sh
+    └── check-pr.sh
 ```
+
+Casual reading in Chinese: [`SKILL.zh-Hant.md`](./SKILL.zh-Hant.md). Agents still follow this English file.
 
 Prefer the scripts for repetitive git/gh steps so each run behaves the same way.
 

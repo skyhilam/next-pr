@@ -4,6 +4,11 @@ Grok skill for `skyhilam/dkdm-monorepo`: one draft PR per change, coding in a ba
 
 Organized like [anthropics/skills skill-creator](https://github.com/anthropics/skills/blob/main/skills/skill-creator/SKILL.md): lean `SKILL.md`, `references/` loaded on demand, `scripts/` for deterministic steps.
 
+## 中文閒讀
+
+- [SKILL.zh-Hant.md](./SKILL.zh-Hant.md) — 繁中說明（畀人睇）
+- [SKILL.md](./SKILL.md) — 英文（畀 agent 跟）
+
 ## Install
 
 ```bash
@@ -14,12 +19,13 @@ git clone https://github.com/skyhilam/next-pr.git ~/.grok/skills/next-pr
 
 ```
 next-pr/
-├── SKILL.md                 # when to trigger, roles, flow, stop conditions
+├── SKILL.md
+├── SKILL.zh-Hant.md
 ├── references/
-│   └── code-review.md       # reviewer bar + report format
+│   └── code-review.md
 └── scripts/
-    ├── open-pr.sh           # worktree, branch, draft PR
-    └── check-pr.sh          # Observe: PR / commit / CI JSON
+    ├── open-pr.sh
+    └── check-pr.sh
 ```
 
 ## Scope
