@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
-# Create an isolated worktree + branch + draft PR for skyhilam/dkdm-monorepo.
+# Create an isolated worktree + branch + draft PR for the current git remote.
 # Deterministic git/gh steps so the model does not re-invent them each run.
 #
 # Usage:
 #   open-pr.sh --title "short title" --body-file /path/to/body.md [--branch NAME]
 #
 # Env (optional):
-#   NEXT_PR_REPO   default skyhilam/dkdm-monorepo
-#   NEXT_PR_BASE   default main
+#   NEXT_PR_REPO   owner/name (default: detect from origin)
+#   NEXT_PR_BASE   default: remote HEAD branch (usually main)
 #
 # Prints JSON on stdout:
-#   { "branch", "worktree", "pr_number", "pr_url", "head_sha" }
+#   { "repo", "branch", "worktree", "pr_number", "pr_url", "head_sha", "shared_checkout", "base" }
 set -euo pipefail
 
-REPO="${NEXT_PR_REPO:-skyhilam/dkdm-monorepo}"
-BASE="${NEXT_PR_BASE:-main}"
 TITLE=""
 BODY_FILE=""
 BRANCH=""
@@ -25,7 +23,7 @@ while [[ $# -gt 0 ]]; do
     --body-file) BODY_FILE="${2:-}"; shift 2 ;;
     --branch) BRANCH="${2:-}"; shift 2 ;;
     -h|--help)
-      sed -n '2,20p' "$0"
+      sed -n '2,22p' "$0"
       exit 0
       ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -41,15 +39,41 @@ if [[ ! -f "$BODY_FILE" ]]; then
   exit 2
 fi
 
-# Resolve shared checkout from current directory's git (first worktree path).
 ORIGIN="$(git remote get-url origin 2>/dev/null || true)"
-case "$ORIGIN" in
-  *skyhilam/dkdm-monorepo*) ;;
-  *)
-    echo "origin is not skyhilam/dkdm-monorepo (got: ${ORIGIN:-none}). Refuse to open." >&2
+if [[ -z "$ORIGIN" ]]; then
+  echo "no git remote named origin" >&2
+  exit 1
+fi
+
+# owner/name from SSH or HTTPS origin
+repo_from_origin() {
+  local url="$1"
+  url="${url%.git}"
+  if [[ "$url" =~ github.com[:/]([^/]+)/([^/]+)$ ]]; then
+    echo "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    return
+  fi
+  # generic host:owner/name or path
+  if [[ "$url" =~ [:/]([^/]+)/([^/]+)$ ]]; then
+    echo "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    return
+  fi
+  return 1
+}
+
+REPO="${NEXT_PR_REPO:-}"
+if [[ -z "$REPO" ]]; then
+  REPO="$(repo_from_origin "$ORIGIN")" || {
+    echo "could not parse owner/name from origin: $ORIGIN" >&2
     exit 1
-    ;;
-esac
+  }
+fi
+
+BASE="${NEXT_PR_BASE:-}"
+if [[ -z "$BASE" ]]; then
+  BASE="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
+  [[ -n "$BASE" ]] || BASE="main"
+fi
 
 SHARED="$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
 if [[ -z "$SHARED" || ! -d "$SHARED" ]]; then
@@ -85,6 +109,8 @@ HEAD_SHA="$(git -C "$WORKTREE" rev-parse HEAD)"
 python3 - <<PY
 import json
 print(json.dumps({
+  "repo": "$REPO",
+  "base": "$BASE",
   "branch": "$BRANCH",
   "worktree": "$WORKTREE",
   "pr_number": int("$PR_NUMBER"),

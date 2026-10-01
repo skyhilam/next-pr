@@ -1,8 +1,8 @@
 # next-pr
 
-Grok skill for `skyhilam/dkdm-monorepo`: one draft PR per change, coding in a background subagent.
+Grok skill: one draft PR per code/copy/UI change in the **current** git repo, coding in a background subagent.
 
-Organized like [anthropics/skills skill-creator](https://github.com/anthropics/skills/blob/main/skills/skill-creator/SKILL.md): lean `SKILL.md`, `references/` loaded on demand, `scripts/` for deterministic steps.
+Repo-agnostic — uses `origin` (optional `NEXT_PR_REPO` / `NEXT_PR_BASE`). Not tied to a specific monorepo.
 
 ## 中文閒讀
 
@@ -21,13 +21,8 @@ git clone https://github.com/skyhilam/next-pr.git ~/.grok/skills/next-pr
 next-pr/
 ├── SKILL.md
 ├── SKILL.zh-Hant.md
-├── references/
-│   └── code-review.md
+├── references/code-review.md
 └── scripts/
     ├── open-pr.sh
     └── check-pr.sh
 ```
-
-## Scope
-
-Only when `git remote get-url origin` is `skyhilam/dkdm-monorepo`.

@@ -1,13 +1,12 @@
 ---
 name: next-pr
 description: >
-  Open a dkdm draft pull request, hand coding to a background subagent,
-  and return so the user can send the next prompt. Use before editing
-  on every code change, fix, feature, copy, or UI request in this repo,
-  including Sunmi desk work. The user prompt is the scope. Do not stage
-  unrelated dirty files. Skip for questions, reviews, acceptance, and
-  explanations. Continue the current pull request only when the user
-  says to. /next-pr
+  Open one draft pull request per code, copy, or UI change in the current
+  git repository, hand coding to a background subagent, and return so the
+  user can send the next prompt. Use before editing on every such request.
+  The user prompt is the scope. Do not stage unrelated dirty files. Skip
+  for questions, reviews, acceptance, and explanations. Continue the
+  current pull request only when the user says to. /next-pr
 metadata:
   short-description: "Draft PR, code in background"
 user-invocable: true
@@ -15,17 +14,19 @@ user-invocable: true
 
 # Next PR
 
-One user prompt that changes code, copy, or UI in `skyhilam/dkdm-monorepo` becomes one draft pull request. Coding runs in a background subagent so the parent can return and take the next prompt.
+One user prompt that changes code, copy, or UI in the **current** git repository becomes one draft pull request. Coding runs in a background subagent so the parent can return and take the next prompt.
+
+This skill is **repo-agnostic**: it uses `origin` from the session directory (and optional `NEXT_PR_REPO` / `NEXT_PR_BASE`). It is not limited to any one monorepo.
 
 ## When to use / skip
 
-**Use** when the prompt will change behavior, copy, or UI in this repo (including Sunmi desk work). The prompt text is the whole scope.
+**Use** when the prompt will change behavior, copy, or UI. The prompt text is the whole scope.
 
 **Skip** (do not open a PR) for questions, reviews, acceptance checks, and explanations.
 
 **Stay on an existing PR** only when the user says to continue it or names its number.
 
-Resolve the shared checkout from git (`git remote get-url origin` must be `skyhilam/dkdm-monorepo`; first `worktree` path in `git worktree list --porcelain`). Do not hardcode a machine path. In any other repository, ignore this skill.
+Resolve the shared checkout from git: `git remote get-url origin` must exist; first `worktree` path in `git worktree list --porcelain` is the shared checkout. Do not hardcode a machine path.
 
 ## Roles
 
@@ -57,7 +58,7 @@ Prefer the scripts for repetitive git/gh steps so each run behaves the same way.
 
 Keep one durable log per open PR (session notes or a file beside the worktree). Store **facts** (ids, SHAs, CI conclusions bound to a SHA), not stale display labels like “passed”. Derive the next action from those facts on every wake.
 
-Minimum fields: task, PR number/URL, branch, worktree, **owner agent id**, current agent/role, stage (`opened`|`coding`|`review`|`fixing`|`ready`|`ci`|`merged`|`stopped`), last reviewed head SHA, last observed head SHA, last CI conclusions for that SHA, last review outcome (`no_blockers`|`blockers` + text), fix round (0–3), blocked-on-decision note.
+Minimum fields: task, **repo** (`owner/name`), PR number/URL, branch, worktree, **owner agent id**, current agent/role, stage (`opened`|`coding`|`review`|`fixing`|`ready`|`ci`|`merged`|`stopped`), last reviewed head SHA, last observed head SHA, last CI conclusions for that SHA, last review outcome (`no_blockers`|`blockers` + text), fix round (0–3), blocked-on-decision note.
 
 Read the log before any dispatch. If that stage’s agent is already running, do not spawn a duplicate.
 
@@ -71,7 +72,7 @@ Read the log before any dispatch. If that stage’s agent is already running, do
 
    `scripts/open-pr.sh --title "<short title>" --body-file <path>`
 
-   Use the JSON it prints (branch, worktree, pr_number, pr_url, head_sha) to seed the work log (stage `coding`, fix round `0`).
+   Use the JSON it prints (`repo`, branch, worktree, pr_number, pr_url, head_sha, base) to seed the work log (stage `coding`, fix round `0`).
 4. Spawn a background coder with `cwd` = that worktree. Prompt = user task + branch + limits: only files this task needs; commit/push to this branch; run scoped tests; do not open/ready/merge a PR; do not spawn subagents. Record that agent as **owner**.
 5. Reply with PR link + worktree + “coding in background”. Stop. Do not wait.
 
@@ -85,7 +86,7 @@ If a newer user prompt arrived first, finish that Open, then resume the finished
 
 ### 3. After coder finishes
 
-Set stage `review`. Spawn a background reviewer on the same worktree. It reads `references/code-review.md` and reviews the branch against `origin/main` without editing. It must report the **head SHA** it reviewed. If the reference file is missing, stage `stopped` and say so.
+Set stage `review`. Spawn a background reviewer on the same worktree. It reads `references/code-review.md` and reviews the branch against `origin/<base>` (base from the work log / open-pr JSON) without editing. It must report the **head SHA** it reviewed. If the reference file is missing, stage `stopped` and say so.
 
 ### 4. After review finishes
 

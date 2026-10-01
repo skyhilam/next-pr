@@ -1,31 +1,59 @@
 #!/usr/bin/env bash
-# Observe PR / head / CI facts for skyhilam/dkdm-monorepo (read-only).
-# Use this for the Observe step; write the JSON into the work log before Act.
+# Observe PR / head / CI facts for the current (or given) repo. Read-only.
 #
 # Usage:
-#   check-pr.sh <pr-number-or-url>
+#   check-pr.sh <pr-number-or-url> [--repo owner/name]
 #
-# Prints JSON on stdout with fields bound to the current head SHA.
+# Env: NEXT_PR_REPO overrides detection from origin when --repo omitted.
 set -euo pipefail
 
-REPO="${NEXT_PR_REPO:-skyhilam/dkdm-monorepo}"
-TARGET="${1:-}"
+TARGET=""
+REPO="${NEXT_PR_REPO:-}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) REPO="${2:-}"; shift 2 ;;
+    -h|--help)
+      sed -n '2,12p' "$0"
+      exit 0
+      ;;
+    *)
+      if [[ -z "$TARGET" ]]; then TARGET="$1"; shift
+      else echo "unexpected arg: $1" >&2; exit 2
+      fi
+      ;;
+  esac
+done
+
 if [[ -z "$TARGET" ]]; then
-  echo "usage: check-pr.sh <pr-number-or-url>" >&2
+  echo "usage: check-pr.sh <pr-number-or-url> [--repo owner/name]" >&2
   exit 2
+fi
+
+if [[ -z "$REPO" ]]; then
+  ORIGIN="$(git remote get-url origin 2>/dev/null || true)"
+  if [[ -n "$ORIGIN" ]]; then
+    ORIGIN="${ORIGIN%.git}"
+    if [[ "$ORIGIN" =~ [:/]([^/]+)/([^/]+)$ ]]; then
+      REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    fi
+  fi
+fi
+if [[ -z "$REPO" ]]; then
+  echo "could not determine repo; pass --repo owner/name" >&2
+  exit 1
 fi
 
 PR_JSON="$(gh pr view "$TARGET" --repo "$REPO" --json \
   number,url,title,state,isDraft,mergeable,mergeStateStatus,headRefName,headRefOid,baseRefName,statusCheckRollup,reviews,comments)"
 
-python3 - <<'PY' "$PR_JSON"
+python3 - <<'PY' "$PR_JSON" "$REPO"
 import json, sys
-from collections import defaultdict
 
 pr = json.loads(sys.argv[1])
+repo = sys.argv[2]
 head = pr.get("headRefOid") or ""
 
-# Latest check per name (by completedAt/startedAt)
 latest = {}
 for c in pr.get("statusCheckRollup") or []:
     name = c.get("name") or c.get("context")
@@ -43,7 +71,7 @@ FAILURES = {
 PENDING = {"QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED", "STALE"}
 
 checks = []
-pending, failed, success = [], [], []
+pending, failed = [], []
 summary = None
 for name, c in sorted(latest.items()):
     status = (c.get("status") or c.get("state") or "").upper()
@@ -52,18 +80,11 @@ for name, c in sorted(latest.items()):
     checks.append(entry)
     if name == "CI summary":
         summary = entry
-    if status in PENDING or (not conclusion and status not in ("COMPLETED", "SUCCESS", "FAILURE")):
-        if status in PENDING or status in ("", "EXPECTED"):
-            pending.append(name)
-            continue
+    if status in PENDING or status in ("", "EXPECTED"):
+        pending.append(name)
+        continue
     if conclusion in FAILURES or status in FAILURES:
         failed.append(name)
-    elif conclusion in ("SUCCESS", "NEUTRAL", "SKIPPED") or status in ("SUCCESS",):
-        success.append(name)
-    elif status == "COMPLETED" and conclusion in ("SUCCESS", "NEUTRAL", "SKIPPED", ""):
-        success.append(name)
-    elif conclusion == "" and status == "COMPLETED":
-        success.append(name)
 
 ci_conclusion = "unknown"
 if failed:
@@ -80,6 +101,7 @@ changes_requested = [
 ]
 
 out = {
+    "repo": repo,
     "pr_number": pr.get("number"),
     "pr_url": pr.get("url"),
     "state": pr.get("state"),
