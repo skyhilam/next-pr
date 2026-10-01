@@ -184,3 +184,16 @@ Treat these as presumptive blockers unless the author can justify them clearly:
 - the PR duplicates an existing helper or puts logic in the wrong layer when there is a clear canonical home
 
 If those conditions are not met, leave explicit, actionable feedback and push for a cleaner decomposition.
+
+## Report format (for next-pr)
+
+When used as the next-pr reviewer, end with a short machine-usable block so the parent can update the work log:
+
+```
+HEAD_SHA: <full sha reviewed>
+OUTCOME: no_blockers | blockers
+BLOCKERS:
+- <blocker or "none">
+```
+
+Review against `origin/main`. Do not edit, commit, push, or change the pull request.
