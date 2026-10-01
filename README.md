@@ -18,9 +18,13 @@ Or keep a clone elsewhere and symlink into `~/.grok/skills/next-pr`.
 ## Reliability rules (in SKILL.md)
 
 - **Background completion**: continue only on a native agent-finished wake; otherwise stop in a recoverable draft state.
-- **Work log**: task, PR, branch, worktree, agent, stage; check before re-dispatch.
-- **Review scope**: bind pass/fail to the reviewed head SHA; new commits need a new review.
+- **Work log (facts)**: task, PR, branch, worktree, owner agent, stage, SHAs, CI conclusions; check before re-dispatch. Do not trust stale “passed” labels.
+- **Same owner**: CI / review / conflict feedback always returns to the owner agent on that worktree.
+- **Observe then act**: read GitHub facts into the log before fixer / ready / merge.
+- **Review scope**: bind outcomes to the reviewed head SHA; new commits need a new review.
 - **Fix cap**: at most three fixer rounds; then keep draft and report leftovers.
+
+Patterns inspired in part by [Untrivial-ai/agent-orchestrator](https://github.com/Untrivial-ai/agent-orchestrator) (durable facts, observe→act, same-owner feedback).
 
 ## Scope
 
