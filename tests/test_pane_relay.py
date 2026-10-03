@@ -88,6 +88,55 @@ class RelayTests(unittest.TestCase):
         d.reply(self.store, 'task-1', 'Local fixture', followup['event_id'], 'reply-3')
         self.assertEqual(len(self.fake.sends), 2)
 
+    def test_wait_does_not_reemit_answered_transcript_on_busy_transition(self):
+        event = self.waiting()
+        d.reply(self.store, 'task-1', 'Proceed ready', event, 'r')
+        self.fake.activity = 'active'
+        self.fake.events = [dict(gen=8, kind='agent.busy', paneId='pane-1', panelId='panel-1')]
+        original = self.fake
+        waited = []
+        def silent(*args, **kwargs):
+            if args[0] == 'watch' and args[args.index('--timeout-ms') + 1] != '0':
+                waited.append(True)
+                raise d.DispatchError('process_timeout')
+            return original(*args, **kwargs)
+        with patch.object(d, 'pane', silent):
+            result = d.wait(self.store, 'task-1', .1)
+        self.assertEqual(result['outcome'], 'timeout')
+        self.assertTrue(waited)
+        conversation = result['task']['conversation']
+        self.assertEqual(conversation['event_id'], event)
+        self.assertTrue(conversation['consumed'])
+        self.assertFalse(conversation['new'])
+        self.assertFalse(conversation['replyable'])
+        self.fake.message = 'Next question: red or blue?'
+        self.fake.activity = 'idle'
+        followup = d.wait(self.store, 'task-1', .1)
+        self.assertEqual(followup['outcome'], 'update')
+        self.assertTrue(followup['task']['conversation']['new'])
+        self.assertFalse(followup['task']['conversation']['consumed'])
+
+    def test_answered_transcript_does_not_hide_terminal_event(self):
+        event = self.waiting()
+        d.reply(self.store, 'task-1', 'Proceed ready', event, 'r')
+        self.fake.events = [dict(gen=9, kind='panel.exited', paneId='pane-1', panelId='panel-1', exitCode=1)]
+        result = d.wait(self.store, 'task-1', .1)
+        self.assertEqual(result['outcome'], 'update')
+        self.assertEqual(result['task']['state'], 'needs_attention')
+        self.assertEqual(result['task']['terminal_event']['kind'], 'panel.exited')
+        self.assertFalse(result['task']['conversation']['new'])
+        self.assertFalse(result['task']['conversation']['replyable'])
+
+    def test_receipt_artifacts_do_not_enter_task_scan(self):
+        event = self.waiting()
+        d.reply(self.store, 'task-1', 'Proceed ready', event, 'r')
+        receipts = self.store.root / 'receipts'
+        receipts.mkdir(mode=0o700)
+        d.private_write(receipts / 'shell-completion.json', '{"shell_handle":"fixture"}')
+        self.assertEqual([r['task_id'] for r in self.store.all()], ['task-1'])
+        self.assertEqual(list(self.store.root.glob('*.json')), [self.store.path('task-1')])
+        self.assertEqual([r['task_id'] for r in d.active(self.store)], ['task-1'])
+
     def test_stale_prompt_and_wrong_identity_rejected(self):
         event = self.waiting()
         self.fake.message = 'Changed choice: delete or keep?'

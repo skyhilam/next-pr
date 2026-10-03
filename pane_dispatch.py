@@ -617,19 +617,15 @@ def observe(record):
             content_signature == record.get('consumed_content_signature')):
         source, excerpt, question = 'pane_worker_report', evidence['question'][-TEXT_LIMIT:], evidence['question'][-TEXT_LIMIT:]
         truncated = len(evidence['question']) > TEXT_LIMIT
-    # Include activity in the event (no guessed question semantics from a stale transcript).
-    # A busy->idle cycle can return the same words as a genuinely new prompt.
+    # Activity is separate evidence, not a new message: last-message has no timestamp.
+    # In particular, becoming busy must not resurrect the question we just answered.
     previous = record.get('conversation') or {}
-    if (activity.get('activityStatus') == 'active' and previous.get('activity') != 'active') or any(
-            e.get('kind') == 'agent.busy' and e.get('gen', 0) > record.get('busy_generation', 0) for e in scoped):
-        record['turn_epoch'] = record.get('turn_epoch', 0) + 1
-    record['busy_generation'] = max([record.get('busy_generation', 0)] +
-                                     [e.get('gen', 0) for e in scoped if e.get('kind') == 'agent.busy'])
     conversation = dict(provenance=source, excerpt=excerpt, question=question,
                         options=options, truncated=truncated, untrusted=True,
                         activity=activity.get('activityStatus'), read_errors=errors,
                         held_input=bool(screen.get('composer', {}).get('hasUndeliveredText')),
                         report_key=report_key, content_signature=content_signature)
+    # Freeze the legacy epoch so upgrading does not invalidate a pending prompt's ID.
     fingerprint = dict(pane=record['pane_id'], panel=record['panel_id'], source=source,
                        text=excerpt, options=options, epoch=record.get('turn_epoch', 0))
     if source == 'pane_worker_report':
@@ -646,12 +642,21 @@ def observe(record):
                                 (bool(options) or activity.get('activityStatus') == 'idle' or
                                  (source == 'pane_worker_report' and record['state'] == 'reported_blocked')))
     # Any send intent consumes this event, even if delivery is ambiguous.
-    if (any(r['event_id'] == conversation['event_id'] for r in record.get('replies', {}).values()) or
-            (record.get('consumed_content_signature') == content_signature and
-             record.get('consumed_report') == report_key)):
-        conversation['replyable'] = False
+    conversation['consumed'] = (any(r['event_id'] == conversation['event_id'] for r in record.get('replies', {}).values()) or
+                               (record.get('consumed_content_signature') == content_signature and
+                                record.get('consumed_report') == report_key))
+    if conversation['consumed']:
+        conversation.update(new=False, replyable=False)
         if record['state'] == 'needs_attention':
             record['state'] = 'awaiting_reply_evidence'
+    terminal = next((e for e in reversed(scoped) if e.get('kind') in ('panel.exited', 'pane.gone')), None)
+    if terminal:
+        record['terminal_event'] = pick(terminal, ('gen', 'at', 'kind', 'exitCode'))
+    if record.get('terminal_event'):
+        # A consumed transcript must not suppress termination or permit input into a shell.
+        if record['state'] not in ('reported_ready', 'reported_failed', 'incomplete_report'):
+            record['state'] = 'needs_attention'
+        conversation['replyable'] = False
     record['conversation'] = conversation
     record['pane_link'] = 'pane://open?' + urlencode(dict(pane=record['pane_id'], panel=record['panel_id']))
     latest = record.get('last_reply_id')

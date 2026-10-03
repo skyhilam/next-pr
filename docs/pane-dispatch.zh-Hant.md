@@ -36,7 +36,8 @@ ln -s "$PWD/bin/pane-dispatch" "$HOME/.local/bin/pane-dispatch"
 > `$HOME/.local/bin/pane-dispatch wait --task-id TASK_ID --timeout-seconds 45`。
 > Shell 只在背景命令結束時通知並喚醒 Bot（即使回合已結束），不因程序仍在跑時的 stdout 行喚醒。
 > 因此不可用永不結束的 `runpane watch --follow` 當作這個 callback 的載體。
-> 透過 UpdateState 記錄每個 task 的 Shell handle、pending_event_id 與已通知 event；每 task 最多一個 wait。
+> 透過 UpdateState 記錄 owned_task_ids／明確接收的 handoff，以及每個 task 的 Shell handle、pending_event_id 與已通知 event。
+> active 是兩個 Bot 共用的全域快照；只恢復本 Bot 擁有／接收 handoff 的 task ID，每 task 最多一個 wait。
 > 收到 completion callback，先核對並清除對應 handle，再讀完整 JSON。重複／過期 callback 不再啟動 waiter。
 > timeout 且任務仍 active、沒有 pending question，才靜默啟動下一個 bounded background wait；不要向人洗 timeout 訊息。
 > 問題／選單／permission prompt 要原文連 Pane link 轉給使用者，記錄 task_id + event_id，然後停止背景 rearm。
@@ -68,12 +69,17 @@ $HOME/.local/bin/pane-dispatch wait --task-id TASK_ID --timeout-seconds 45
 ```
 
 使用 `UpdateState` 保留每 task 的邏輯狀態（不是新工具參數）：`wait_shell_handle`、
-`arming`、`pending_event_id`、`last_forwarded_event_id`、`last_seen_journal_generation`。
+`arming`、`pending_event_id`、`last_forwarded_event_id`、`last_seen_journal_generation`；
+另保存本 Bot 的 `owned_task_ids`，只能來自自己啟動的任務或明確接收的 owner handoff。
 開始 Shell 呼叫前先記錄 arming；取得 handle 後立即保存並清除 arming。存在 handle 或 arming 時
 不得再啟動 waiter。重入／恢復時先對照原 Shell handle；狀態不明就檢查，不能猜它死了而重開。
 `active` 是 dispatcher 任務快照，不代表可以忽略 Bot 已保存的 pending question 或現有 waiter。
-同一 task 只由實際 owner 總 · Eng arm；主 Bot 把該 task 交給 Eng 後不得另開 waiter。
-兩處 profile 安裝同一契約不代表兩份監看權；owner 交接須保留原 handle／pending 狀態。
+兩個 Bot 共用同一 dispatcher；`active` 包含其他 Bot 的任務，不能把所有結果自動 arm。
+恢復範圍必須是 `active.task_id` 與本 Bot `owned_task_ids` 的交集，再檢查 handle／pending。
+未有 owner 或 ownership 不明的任務只供查看，不自動接管。主 Bot 監看自己的任務，Eng 監看
+自己的任務；本業務 task owner 是 Eng。主 Bot 明確交給 Eng 後即移出自己的恢復範圍。
+兩處 profile 安裝同一契約不代表兩份監看權；handoff 要明確移交 owner、原 handle、pending
+與已通知 event，舊 owner 停止 rearm，新 owner 先確認繼承 handle，不能重開一個 waiter。
 
 | Shell 完成後的結果 | 總 · Eng 的動作 |
 | --- | --- |
@@ -129,6 +135,9 @@ Shell 啟動設定或 snapshot 仍可能重新帶入舊值，所以 report 一�
 
 狀態放在 `~/.local/state/pane-dispatch`（目錄 0700、檔案 0600），可用全域
 `--state-dir PATH` 指向獨立測試目錄。原子 replace、fsync、flock 保護並行提交。
+root `*.json` 專供 task record 掃描；Bot 的 Shell／通知 receipts 放 UpdateState、私有
+`receipts/` 子目錄或 dispatcher 外，不可寫成 root `*.json`。現有 reply 內容檔使用 `.reply`，
+delivery intent 在該 task record 內，不建立額外 root JSON。
 請保留狀態目錄：相同 task-id、repo 字串、選擇模式與任務原文重送會回傳原任務；
 同 ID 改內容會拒絕。建立前先記錄 intent，使用 task-id hash 命名 Pane/branch。
 逾時、程序錯誤或 crash 後只對照現有同名 Pane，**絕不重開第二個 worker**。
@@ -152,8 +161,11 @@ Shell 啟動設定或 snapshot 仍可能重新帶入舊值，所以 report 一�
 不持有全域鎖等待。回傳 `{outcome:"update",task:...}`、`needs_attention` 或 `timeout`。
 同一未回答問題可在手動重讀 wait 時再次出現，但 new=false；Bot 正常流程在 pending question
 時已停止背景 rearm，不應反覆呼叫 wait 或重複通知／索取許可。
-沒有排程器或常駐背景程序。`active` 列出本機未結案任務的快照，恢复時逐一 status/wait，
-不要重新 start。`reported_ready` 仍只是具完整證據的 worker 自述，`independently_verified:false`；
+回答過的內容標記 `conversation.consumed:true`、`new:false`、`replyable:false`；
+worker 轉 busy 不改訊息 fingerprint，wait 會繼續等新內容，不重新轉發舊 transcript。
+活動／resume_evidence 另外保留；新的 terminal event 仍立即返回供停止監看。
+沒有排程器或常駐背景程序。`active` 列出共用 dispatcher 的未結案快照；恢復時先以
+本 Bot 明確擁有／已接收 handoff 的 task ID 過濾，才逐一 status/wait，不要盲目全部 rearm 或重新 start。`reported_ready` 仍只是具完整證據的 worker 自述，`independently_verified:false`；
 主 Bot 須核對 PR head、CI、review。`incomplete_report`、`status_error` 絕不可呈現為成功。
 
 ```sh
