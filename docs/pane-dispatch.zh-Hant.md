@@ -72,10 +72,12 @@ ln -s "$PWD/bin/pane-dispatch" "$HOME/.local/bin/pane-dispatch"
 | stored schedule | `@every 5m`，UI 顯示 Every 5 minutes；原生最短週期為 **5 分鐘**，不是 1 分鐘。 |
 | enabled 狀態 | 已啟用，UI 顯示 **Pause** 按鈕。 |
 | 目前指令／範圍 | 只處理 owned `tcg-staff-default-path-copy`，讀 status + last-message/screen、panel/fingerprint 去重；無 runnable owned task 時停用，start/reply 後重新啟用。 |
+| 原生 unattended 實測 | parent 回報 19:01 無新使用者訊息時 routine 自行觸發，Eng 轉發 vendor permission menu；19:03 使用者回答，Eng 送 Down + Enter，Claude 恢復執行 phpunit。 |
 | 新版整合 | parent 安裝後將同一 routine 更新為下述 wait/reply 契約，再測試無新使用者訊息的完整轉發與停用／重新啟用。 |
 | Shell callback | 真實測試沒有喚醒；不能作為可靠監看承諾。 |
 
-以上是 parent 提供的 UI 設定驗證，不是本 worker 宣稱已完成新版端到端測試。
+以上包含 parent 提供的 UI 設定、實際 unattended tick 與選單回覆後恢復執行證據；
+不是本 worker 宣稱已完成新版 dispatcher 的 ordinary-question smoke test。
 無人值守最多等 **5 分鐘**才到下一次排程檢查（另加工具執行時間）；目前回合可立即使用
 status／bounded wait 及時觀察。不要承諾即時 callback，也不要把 UI 啟用或 Shell 正常結束當作
 已成功交付結果。parent 仍負責新版安裝、routine 指令更新及實際 smoke test。

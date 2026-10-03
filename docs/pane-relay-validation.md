@@ -9,18 +9,23 @@ earlier claim that Shell completion reliably wakes the Bot.** CLI `wait` remains
 for bounded observation, but cannot provide cross-turn supervision by itself. Parent verified the native `UpdateState` routine **`pane-cli-eng`** in desktop UI:
 **enabled** (Pause button), **`@every 5m` / Every 5 minutes**. Five minutes is the native
 minimum. Parent will update this same routine to the new wait/reply contract after installation
-and perform the end-to-end smoke test; UI verification alone is not that acceptance test.
+and perform the ordinary-question smoke test. Parent also verified a real unattended routine
+tick at **19:01** with no new user input: Eng relayed a vendor permission menu. At **19:03**,
+the user answered, Eng sent Down + Enter, and Claude resumed phpunit. This verifies native
+routine wake and that live menu recovery, not the still-pending new-dispatcher smoke test.
 
 ## Install and verify (parent)
 
 The existing executable symlink points to
 `/Users/hotinlam/.local/share/pane-dispatch/source/bin/pane-dispatch`.
-After checking that this retained checkout is clean, fast-forward it to the reviewed fix:
+After checking that this retained checkout is clean, fast-forward it to the reviewed fix.
+The install branch `fix/cli-conversation-relay-20261003` points to the same commit as draft
+PR #4’s existing head branch `fix/pane-conversation-relay`; the PR stays open for its reviewer:
 
 ```sh
 git -C /Users/hotinlam/.local/share/pane-dispatch/source status --short
-git -C /Users/hotinlam/.local/share/pane-dispatch/source fetch origin fix/pane-conversation-relay
-git -C /Users/hotinlam/.local/share/pane-dispatch/source merge --ff-only origin/fix/pane-conversation-relay
+git -C /Users/hotinlam/.local/share/pane-dispatch/source fetch origin fix/cli-conversation-relay-20261003
+git -C /Users/hotinlam/.local/share/pane-dispatch/source merge --ff-only origin/fix/cli-conversation-relay-20261003
 cd /Users/hotinlam/.local/share/pane-dispatch/source
 python3 -m unittest discover -s tests -v
 bin/pane-dispatch --help
@@ -39,7 +44,7 @@ relay the final evidence, even if another observer already persisted `reported_r
 On handoff, the old owner removes the task from its recovery set; the new owner preserves
 and verifies the existing Shell handle, pending question and notified fingerprints.
 
-## Cross-turn wake boundary: failed callback and verified routine configuration
+## Cross-turn wake boundary: failed callback and verified native routine wake
 
 Parent’s real test: background Shell handle **138984**, **18:48:28–18:49:14**, 46 seconds,
 exit 0, empty output. It did **not** wake Grok Bot/Eng after final. The next wake was the
@@ -60,6 +65,7 @@ No old runner, custom scheduler or Python daemon is introduced. The API names ar
 | Enabled state | Enabled; UI shows the **Pause** button. |
 | Current owner/task scope | 總 · Eng; only owned `tcg-staff-default-path-copy`. Current text checks status + last-message/screen and dedupes by panel/fingerprint. |
 | Idle disable / same-ID re-enable | Present in the verified routine text: disable with no runnable owned tasks; re-enable after start/reply. |
+| Unattended native routine evidence | Parent reports a 19:01 tick with no new user input, forwarding the vendor permission menu; user answered at 19:03, Eng sent Down + Enter, and Claude resumed phpunit. |
 | New dispatcher integration | Parent will update the same routine to wait/reply after installation, then test unattended delivery and disable/re-enable end to end. |
 
 Unattended observation can take **up to five minutes until the next scheduled check**, plus
@@ -88,7 +94,8 @@ The native routine contract is:
    in Bot state. Keep receipts in UpdateState, a private `receipts/` subdirectory or outside
    the dispatcher root; never create receipt JSON beside root `*.json` task records.
 
-The routine ID, schedule and enabled state are **UI-verified by parent**. Installation,
+The routine ID, schedule and enabled state are **UI-verified by parent**, and the 19:01
+unattended tick plus 19:03 authorized menu reply/resumption are parent-observed evidence. Installation,
 updating that routine to the new dispatcher commands, and end-to-end acceptance remain
 with parent; CLI wait alone does not solve cross-turn wake. The detailed owner
 bootstrap and tick result table are in [the dispatcher guide](pane-dispatch.zh-Hant.md).
