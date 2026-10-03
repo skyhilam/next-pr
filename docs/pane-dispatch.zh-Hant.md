@@ -32,7 +32,7 @@ ln -s "$PWD/bin/pane-dispatch" "$HOME/.local/bin/pane-dispatch"
 > 其他 coordinator 或巢狀 worker。先執行 inventory/recommend，說明可用 CLI、負載與 quota；
 > 等使用者選擇。使用者已明確指定 CLI 就直接使用；明確授權 auto 才傳 `--auto`。
 > 把原始任務原文寫入私有 prompt 檔，以穩定 task-id 執行 start。
-> start 只是開始，不是完成。每次 start 或成功送出 reply 後，用原生 Shell 的背景模式執行
+> start 只是開始，不是完成。每次 start 或成功送出 submission reply 後，用原生 Shell 的背景模式執行
 > `$HOME/.local/bin/pane-dispatch wait --task-id TASK_ID --timeout-seconds 45`。
 > Shell 只在背景命令結束時通知並喚醒 Bot（即使回合已結束），不因程序仍在跑時的 stdout 行喚醒。
 > 因此不可用永不結束的 `runpane watch --follow` 當作這個 callback 的載體。
@@ -94,14 +94,15 @@ $HOME/.local/bin/pane-dispatch wait --task-id TASK_ID --timeout-seconds 45
 
 `last-message` 不可用但 screen fallback 正常，並非 terminal error；依證據的 provenance 判斷。
 收到使用者對 pending event 的回答後，`reply` 的 `sent` 只表示送出，不是 resumed；
-清除 pending 並重新 arm 一個 wait，讓後續活動或 report 提供恢復證據。若 delivery 是 unknown／
+只有 `action:submit` 清除 pending 並重新 arm 一個 wait，讓後續活動或 report 提供恢復證據。
+`action:navigate` 保留選單 pending，先 status 檢查選取項目，再依已授權選擇送下一鍵；不重問許可。若 delivery 是 unknown／
 reply 出錯，停止自動流程並檢查，不重送。使用者 cancel 就停止該任務的監看流程；不把 cancel
 自行翻譯成任意 terminal 中斷或業務動作。
 
 parent 負責把本契約安裝到主 Bot 與實際 owner 總 · Eng，並在確認 Shell handle 對應的命令、
 任務與程序後，只停止他們那一個過時的 `watch --follow`。不要批次 kill watch/runpane 或動到
-其他 worker。本修復不代為停止程序，也不修改既有業務 task。已經經 Eng 轉發的業務問題應保存為
-pending，等待使用者 `go ready`／`go draft`／`cancel`；不得重新 arm 或代替使用者回答。
+其他 worker。本修復不代為停止程序，也不修改既有業務 task。使用者已經在 Eng 回覆 `go ready`，業務 Claude 正在工作；Eng 以暫時 bounded watch 恢復監看。
+不要重送該回答、重建任務或另開重複 waiter；parent 接替既有監看 handle 時遵守同一 owner 契約。
 
 ## 使用
 
@@ -186,8 +187,11 @@ reply 重新驗證身分及當前 prompt fingerprint，使用 `panels submit --i
 
 TUI 使用 `--key up|down|enter|1..9`，每次只送一個受限按鍵，仍須 reply-file 記錄使用者原始選擇。
 只有當前 screen 有可辨認選單才接受 key，數字必須在該選單出現。每次 key 後 status，
-確認選取項目及新 event_id，才送下一鍵。例如使用者已選 Ready，就 down、觀察 Ready 已選中、
-enter；不再問一次許可。看不清或不支援的選單交給使用者在 Pane 操作，不自動 yes。
+確認選取項目及當前 event_id，才送下一鍵。例如使用者已選 Ready，就 down、觀察 Ready 已選中、
+enter；不再問一次許可。已確認送出的 up/down 回傳 `action:navigate`、
+`consumes_event:false`；例如第一項再 up 令 screen/event 不變，仍可用相同 event_id、不同 reply_id
+送 enter。重複同一 reply_id 仍只回原結果，不再送按鍵。文字、enter 及可能直接提交的數字鍵
+屬 `action:submit`，消耗 event；不確定送達／crash 的 navigation intent 也保持消耗，不自動重試或 enter。看不清或不支援的選單交給使用者在 Pane 操作，不自動 yes。
 Pane 沒有 compare-and-send 原子 API；dispatcher 的 task lock 防止自身並行重送，
 無法排除另一位人在最後 revalidation 和 send 之間直接操作 terminal 的短暫競態。
 

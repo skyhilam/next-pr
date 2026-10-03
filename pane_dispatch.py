@@ -641,9 +641,10 @@ def observe(record):
                                 record['state'] not in ('reported_ready', 'reported_failed', 'incomplete_report') and
                                 (bool(options) or activity.get('activityStatus') == 'idle' or
                                  (source == 'pane_worker_report' and record['state'] == 'reported_blocked')))
-    # Any send intent consumes this event, even if delivery is ambiguous.
-    conversation['consumed'] = (any(r['event_id'] == conversation['event_id'] for r in record.get('replies', {}).values()) or
-                               (record.get('consumed_content_signature') == content_signature and
+    # Submission/unknown intents consume the event; confirmed navigation does not.
+    conversation['consumed'] = (any(r['event_id'] == conversation['event_id'] and r.get('consumes_event', True)
+                                   for r in record.get('replies', {}).values()) or
+                               (not options and record.get('consumed_content_signature') == content_signature and
                                 record.get('consumed_report') == report_key))
     if conversation['consumed']:
         conversation.update(new=False, replyable=False)
@@ -745,12 +746,15 @@ def reply(store, task_id, reply_text, event_id, reply_id, key=None):
             raise DispatchError('no_current_menu')
         path = store.root / (digest(task_id + ':' + reply_id) + '.reply')
         private_write(path, reply_text)
+        navigation = key in ('up', 'down')
         delivery = dict(reply_id=reply_id, **request, delivery='unknown', intent_at=now(),
+                        action='navigate' if navigation else 'submit', consumes_event=True,
                         pane_id=record['pane_id'], panel_id=record['panel_id'], resume_evidence=None)
         replies[reply_id] = delivery
         record['last_reply_id'] = reply_id
-        record['consumed_report'] = current.get('report_key')
-        record['consumed_content_signature'] = current['content_signature']
+        if not navigation:
+            record['consumed_report'] = current.get('report_key')
+            record['consumed_content_signature'] = current['content_signature']
         record['state'] = 'awaiting_reply_evidence'
         store.save(record)  # Durable unknown intent BEFORE send. A crash must never cause a resend.
         try:
@@ -759,8 +763,10 @@ def reply(store, task_id, reply_text, event_id, reply_id, key=None):
             else:
                 payload = {'up': '\x1b[A', 'down': '\x1b[B', 'enter': '\r'}.get(key, key)
                 result = pane('panels', 'input', '--panel', record['panel_id'], '--text', payload, '--yes')
-            delivery.update(delivery='sent', sent_at=now(),
+            delivery.update(delivery='sent', sent_at=now(), consumes_event=not navigation,
                             evidence=pick(result, ('delivery', 'verifiedSubmitted', 'verification', 'submitted')))
+            if navigation:
+                record['state'] = 'needs_attention'
         except DispatchError as exc:
             delivery['error'] = str(exc)
         store.save(record)

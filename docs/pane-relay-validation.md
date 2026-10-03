@@ -24,7 +24,7 @@ python3 -m unittest discover -s tests -v
 bin/pane-dispatch --help
 # Shared snapshot: rearm only IDs owned by this Bot or explicitly handed off to it.
 bin/pane-dispatch active
-# The already-pending business question must not be rearmed during installation.
+# Recover only owned task IDs; preserve Eng’s existing bounded-watch handle.
 ```
 
 Do not recreate or send a reply to the business task without its user's actual instruction.
@@ -58,9 +58,10 @@ and durable delivery intent stays inside the owning task record.
 The parent installs this instruction in both the main Bot and actual 總 · Eng owner. The
 parent alone will stop their exact obsolete `watch --follow` process after confirming its
 Shell handle and command; no broad process kill, routine, daemon, or unsupported callback
-API is part of this fix. The existing business question has now surfaced through Eng and
-is awaiting the user's `go ready` / `go draft` / `cancel`. Preserve that pending state;
-do not rearm, recreate the task, or provide an answer on the user's behalf.
+API is part of this fix. The user has now answered **go ready** in Eng and the business
+Claude is running. Eng has a temporary bounded watch restoring supervision. Do not send
+that reply again, recreate the task, or duplicate its existing observer. Parent coordinates
+any transition to the installed dispatcher using the existing owner/handle state.
 
 ## Reproduction evidence
 
@@ -162,3 +163,24 @@ The inert-menu addition passed **83 tests**; the subsequent answered-transcript,
 wakeup and receipt-isolation regressions bring the full suite to **86 passing tests**. The business task was not read or mutated
 for this menu test. The parent’s real ordinary-Claude question/reply test remains with Eng
 following installation, using the confirmed Shell completion contract above.
+
+## Navigation boundary and lock deadline checks
+
+Confirmed Up/Down delivery returns `action:navigate` and does not consume the menu event.
+At the first option, Up can leave screen/event unchanged; a following Enter uses the same
+event ID with a new reply ID. Duplicate navigation reply IDs still send at most once.
+Enter, text, and numeric keys (which may submit directly) consume the event. Unknown
+navigation delivery retains its consuming intent, preventing an automatic retry or Enter.
+The parent keeps the pending menu through navigation, reads status, then continues the
+already-authorized selection; only submission rearms the background wait.
+
+Regression tests cover unchanged Up-at-first followed by Enter, duplicate navigation and
+submission IDs, ambiguous navigation, real PTY boundary behavior, and a per-task flock held
+by a separate process. The lock test uses a 150 ms deadline and requires return within one
+second while the other process still holds the lock; the same monotonic total deadline
+controls the advertised maximum of 45 seconds. The full suite now has 89 passing tests.
+
+A separate full-duration check held the task lock in another process and called
+`wait(..., timeout_seconds=45)`: it returned `timeout` in **45.0027 seconds** (including
+scheduling/return overhead), with the holder still alive and the lock still held. It did
+not wait for the holder to release the lock or make any Pane calls while contended.

@@ -232,6 +232,37 @@ class RelayTests(unittest.TestCase):
         with self.assertRaisesRegex(d.DispatchError, 'invalid_menu_key'):
             d.reply(self.store, 'task-1', 'go', first['event_id'], 'bad', 'ctrl-c')
 
+    def test_boundary_navigation_keeps_same_event_available_for_enter(self):
+        self.waiting()
+        self.fake.screen = '> 1. Blue\n  2. Green'
+        event = d.status(self.store, 'task-1')['conversation']['event_id']
+        nav = d.reply(self.store, 'task-1', 'Choose Blue', event, 'up-at-first', 'up')
+        self.assertEqual(d.reply(self.store, 'task-1', 'Choose Blue', event, 'up-at-first', 'up'), nav)
+        current = d.status(self.store, 'task-1')['conversation']
+        self.assertEqual(current['event_id'], event)
+        self.assertTrue(current['replyable'])
+        self.assertFalse(current['consumed'])
+        submitted = d.reply(self.store, 'task-1', 'Choose Blue', event, 'confirm-blue', 'enter')
+        self.assertEqual(nav['action'], 'navigate')
+        self.assertEqual(submitted['action'], 'submit')
+        self.assertEqual(d.reply(self.store, 'task-1', 'Choose Blue', event, 'confirm-blue', 'enter'), submitted)
+        self.assertEqual(len(self.fake.sends), 2)
+        self.assertEqual([args[args.index('--text') + 1] for args in self.fake.sends], ['\x1b[A', '\r'])
+        with self.assertRaisesRegex(d.DispatchError, 'stale'):
+            d.reply(self.store, 'task-1', 'Choose Blue', event, 'second-enter', 'enter')
+
+    def test_ambiguous_navigation_does_not_enable_enter_or_retry(self):
+        self.waiting()
+        self.fake.screen = '> 1. Blue\n  2. Green'
+        event = d.status(self.store, 'task-1')['conversation']['event_id']
+        self.fake.send_failure = 'process_timeout'
+        nav = d.reply(self.store, 'task-1', 'Choose Blue', event, 'up', 'up')
+        self.assertEqual(nav['delivery'], 'unknown')
+        self.assertEqual(d.reply(self.store, 'task-1', 'Choose Blue', event, 'up', 'up'), nav)
+        with self.assertRaisesRegex(d.DispatchError, 'stale'):
+            d.reply(self.store, 'task-1', 'Choose Blue', event, 'enter-after-unknown', 'enter')
+        self.assertEqual(len(self.fake.sends), 1)
+
     def test_shell_held_input_and_wrong_read_target_are_not_replyable(self):
         event = self.waiting()
         original = self.fake
@@ -348,7 +379,41 @@ class RelayConcurrencyTests(unittest.TestCase):
                 self.assertEqual(process.exitcode, 0)
             self.assertEqual((Path(directory) / 'send-count').read_text(), 'send\n')
 
+def hold_task_lock(directory, ready, release):
+    with d.Store(directory).locked('contended'):
+        ready.set()
+        release.wait(3)
+
+
 class DeadlineTests(unittest.TestCase):
+    def test_contended_task_lock_obeys_total_wait_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = d.Store(directory)
+            store.save(dict(task_id='contended', state='submitted'))
+            ctx = multiprocessing.get_context('spawn')
+            ready, release = ctx.Event(), ctx.Event()
+            process = ctx.Process(target=hold_task_lock, args=(directory, ready, release))
+            process.start()
+            try:
+                self.assertTrue(ready.wait(3))
+                started = time.monotonic()
+                with patch.object(d, 'pane', side_effect=AssertionError('must not reach Pane while lock is held')):
+                    result = d.wait(store, 'contended', .15)
+                elapsed = time.monotonic() - started
+                self.assertEqual(result['outcome'], 'timeout')
+                self.assertIsNone(result['task'])
+                self.assertGreaterEqual(elapsed, .1)
+                self.assertLess(elapsed, 1)
+                self.assertTrue(process.is_alive())
+                self.assertIsNone(d.DEADLINE.get())
+            finally:
+                release.set()
+                process.join(4)
+                if process.is_alive():
+                    process.kill()
+                    process.join()
+            self.assertEqual(process.exitcode, 0)
+
     def test_real_subprocess_is_killed_at_deadline(self):
         with tempfile.TemporaryDirectory() as directory:
             store = d.Store(directory)
@@ -389,10 +454,11 @@ class InertMenuFixtureTests(unittest.TestCase):
                         break
             self.assertIn(text.encode(), output)
         expect('Selected: Blue | Keys received: 0')
-        for key, text in [(b'\x1b[B', 'Selected: Green | Keys received: 1'),
-                          (b'\x1b[A', 'Selected: Blue | Keys received: 2'),
-                          (b'2', 'Selected: Green | Keys received: 3'),
-                          (b'\r', 'FIXTURE CONFIRMED: Green | Keys received: 4')]:
+        for key, text in [(b'\x1b[A', 'Selected: Blue | Keys received: 1'),
+                          (b'\x1b[B', 'Selected: Green | Keys received: 2'),
+                          (b'\x1b[A', 'Selected: Blue | Keys received: 3'),
+                          (b'2', 'Selected: Green | Keys received: 4'),
+                          (b'\r', 'FIXTURE CONFIRMED: Green | Keys received: 5')]:
             os.write(master, key)
             expect(text)
         self.assertEqual(process.wait(timeout=2), 0)
