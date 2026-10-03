@@ -33,6 +33,8 @@ ln -s "$PWD/bin/pane-dispatch" "$HOME/.local/bin/pane-dispatch"
 > 等使用者選擇。使用者已明確指定 CLI 就直接使用；明確授權 auto 才傳 `--auto`。
 > 把原始任務原文寫入私有 prompt 檔，以穩定 task-id 執行 start。
 > 使用回傳的 Pane/watch argv 監看，status 讀取現有報告；不輪詢 shell 畫面推測完成。
+> Worker 必須依 prompt 中的絕對 task_record_path 驗證自己的 worktree 與 panel，
+> 每次 report 都明確指定 --pane 與 --panel；不可使用繼承的 PANE_* 作為任務身分。
 > 遇到 blocked、permission prompt、未知建立結果，呈現證據讓使用者決定，不自動重試或換 CLI。
 > 成功候選必須有 worker report、測試、PR URL、精確 head SHA；自行核對 PR head/CI/review。
 > 沒有證據就保持 unknown。review 可標記 ready，只有使用者能 merge，永不啟用 auto-merge。
@@ -61,6 +63,9 @@ Codex/Claude/Cursor 使用 Pane built-in agent identity；由於 Pane 2.4.152 �
 permission bypass flags，透過支援的 `--agent` + `--tool-command` 覆寫成安全的絕對 executable。
 不改全域模板。agy/Grok/OpenCode 必須先通過本機 `--help` 檢查，才建立安全引用參數的 custom command。
 沒有 bypass flags；CLI 原有 permission prompts 可能需要使用者處理。
+每個 worker command 以 `/usr/bin/env -u` 移除 `PANE_SESSION_ID`、`PANE_PANEL_ID`、
+`PANE_ORCHESTRATION_SESSION_ID`；其他環境照常保留，不改全域設定或權限。
+Shell 啟動設定或 snapshot 仍可能重新帶入舊值，所以 report 一律依下述記錄驗證，不能只信環境。
 
 ## 結果、恢復與用量
 
@@ -86,7 +91,20 @@ Worker 的 `runpane report --summary-file` 應包含 JSON（prompt envelope 已�
 {"task_id":"issue-42","cli_session_id":null,"head":"0123456789012345678901234567890123456789","pr_url":"https://github.com/owner/repo/pull/42","tests":[{"command":"python3 -m unittest discover -s tests","outcome":"passed"}],"summary":"修改與限制"}
 ```
 
-配合 `runpane report --state ready --pr 42 --head EXACT_40_CHAR_SHA --summary-file RESULT.json --json`。
+新 worker 的 prompt 附有專屬、絕對 `task_record_path`。先讀取該 JSON，核對 `task_id`；
+建立尚未返回時，`pane_id`、`panel_id`、`worktree` 可能仍是 null，可每 2 秒重讀同一檔案、
+最多等 90 秒。不要修改記錄、讀取另一任務的記錄或再次 start。
+修改檔案前與每次 report 前，從 Git 根目錄核對 cwd、`git rev-parse --show-toplevel`、
+`record.worktree` 的 realpath 一致，再用 `panes list --repo RECORD_REPO_ID` 核對 Pane ID、
+名稱及 worktree，以及 `panels list --pane RECORD_PANE_ID` 核對 panel 歸屬。
+逾時仍缺少身分或任何檢查不符／不唯一，就在 terminal 顯示 `BLOCKED: reporting identity unverified`，
+停止工作且不要 report；交由主 Bot 檢查。即使繼承的 `PANE_*` 看似有效也不得回退使用。
+
+驗證後，把 record 的實際 ID 安全地代入 argv：
+`runpane report --pane RECORD_PANE_ID --panel RECORD_PANEL_ID --state ready --pr 42 --head EXACT_40_CHAR_SHA --summary-file RESULT.json --json`。
+failed／blocked（含 `--question`）也必須明確指定同一經驗證的 `--pane` 與 `--panel`。
+`--pane` 單獨使用不足以指定 report；runpane 的明確 `--panel` 才能覆蓋繼承身分。
+已執行中的舊 worker 不會被重新啟動或改寫 prompt；協調器須讓它們採用相同明確 target 驗證流程。
 未知 CLI session ID 維持 null；不把 Pane ID 當成 CLI session ID。報告不能包含憑證。
 
 Quota 由 [CodexBar CLI](https://raw.githubusercontent.com/steipete/CodexBar/main/docs/cli.md)

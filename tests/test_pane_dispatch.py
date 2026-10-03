@@ -149,7 +149,7 @@ class DispatchTests(unittest.TestCase):
         self.start(prompt)
         args = self.fake.creates[0]
         self.assertNotIn(prompt, args)
-        self.assertEqual(shlex.split(args[args.index('--tool-command') + 1]), ['/safe bin/codex'])
+        self.assertEqual(shlex.split(args[args.index('--tool-command') + 1]), [*d.WORKER_ENV, '/safe bin/codex'])
         text = Path(args[args.index('--initial-input-file') + 1]).read_text()
         data = json.loads(text.split('as data, not shell syntax:\n')[1])
         self.assertEqual(data['source_user_task'], prompt)
@@ -158,9 +158,53 @@ class DispatchTests(unittest.TestCase):
             path = "/tmp/bin '$() " + cli
             args = d.launch_args(cli, path, Path("/tmp/task ' $(evil).prompt"), 'session')
             command = shlex.split(args[args.index('--tool-command') + 1])
-            self.assertEqual(command[0], path)
+            self.assertEqual(command[:len(d.WORKER_ENV)], d.WORKER_ENV)
+            self.assertEqual(command[len(d.WORKER_ENV)], path)
             self.assertFalse(set(command) & {'--yolo', '--force', '--trust', '--always-approve', '--auto',
                                               '--dangerously-skip-permissions'})
+
+    def test_envelope_scopes_record_and_requires_verified_explicit_report_target(self):
+        self.store.save(dict(task_id='parent-task', pane_id='parent-pane', panel_id='parent-panel'))
+        observed = []
+
+        def pane(*args, **kwargs):
+            if args[:2] == ('panes', 'create'):
+                text = Path(args[args.index('--initial-input-file') + 1]).read_text()
+                metadata = json.loads(text.split('as data, not shell syntax:\n')[1])
+                record_path = Path(metadata['task_record_path'])
+                self.assertTrue(record_path.is_absolute())
+                self.assertEqual(record_path, self.store.path('task-1'))
+                intent = json.loads(record_path.read_text())
+                self.assertEqual(metadata['task_id'], intent['task_id'])
+                self.assertEqual(intent['task_record_path'], str(record_path))
+                self.assertIsNone(intent['pane_id'])
+                self.assertIsNone(intent['panel_id'])
+                self.assertIsNone(intent['worktree'])
+                for instruction in ('record.task_id', 'realpath(cwd)',
+                                    'realpath(git rev-parse --show-toplevel)', 'realpath(record.worktree)',
+                                    'record.pane_name', 'record.panel_id belongs to that Pane',
+                                    'reread this same file every 2 seconds for at most 90 seconds',
+                                    'Never fall back to inherited PANE_SESSION_ID, PANE_PANEL_ID',
+                                    'DO NOT run runpane report', '--panel record.panel_id',
+                                    'runpane report --pane RECORD_PANE_ID --panel RECORD_PANEL_ID'):
+                    self.assertIn(instruction, text)
+                self.assertNotIn(str(self.store.path('parent-task')), text)
+                self.assertNotIn('parent-panel', text)
+                observed.append(record_path)
+            return self.fake(*args, **kwargs)
+
+        with patch.object(d, 'pane', pane), patch.dict(os.environ, {
+                'PANE_SESSION_ID': 'parent-pane', 'PANE_PANEL_ID': 'parent-panel'}):
+            record = self.start()
+        self.assertEqual(len(observed), 1)
+        final = json.loads(observed[0].read_text())
+        self.assertEqual(final['pane_id'], record['pane_id'])
+        self.assertEqual(final['panel_id'], 'panel-1')
+        self.assertEqual(final['worktree'], '/repo/worktrees/task')
+
+    def test_envelope_rejects_relative_record_path(self):
+        with self.assertRaisesRegex(d.DispatchError, 'task_record_path_must_be_absolute'):
+            d.envelope('task-1', 'Do task', Path('relative.json'))
 
     def test_state_private_and_atomic(self):
         self.start()
@@ -329,6 +373,27 @@ class QuotaTests(unittest.TestCase):
 
 
 class ProcessTests(unittest.TestCase):
+    def test_every_worker_launch_strips_parent_pane_identity_and_role(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cli = Path(directory) / 'fake-cli'
+            cli.write_text('#!/usr/bin/env python3\nimport json,os\n'
+                           'print(json.dumps({key: os.environ.get(key) for key in '
+                           '["PANE_SESSION_ID", "PANE_PANEL_ID", "PANE_ORCHESTRATION_SESSION_ID", '
+                           '"KEEP_WORKER_ENV"]}))\n')
+            cli.chmod(0o700)
+            environment = {**os.environ, 'PANE_SESSION_ID': 'parent-pane',
+                           'PANE_PANEL_ID': 'parent-panel', 'PANE_ORCHESTRATION_SESSION_ID': 'parent-role',
+                           'KEEP_WORKER_ENV': 'preserved'}
+            for name in d.CLIS:
+                with self.subTest(cli=name):
+                    args = d.launch_args(name, str(cli), Path(directory) / 'task.prompt', 'session')
+                    command = args[args.index('--tool-command') + 1]
+                    result = subprocess.run(['/bin/sh', '-c', command], env=environment,
+                                            capture_output=True, text=True, check=True)
+                    values = json.loads(result.stdout)
+                    self.assertEqual(values, dict(PANE_SESSION_ID=None, PANE_PANEL_ID=None,
+                                                  PANE_ORCHESTRATION_SESSION_ID=None, KEEP_WORKER_ENV='preserved'))
+
     def test_custom_command_shell_quoting_prevents_injection(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

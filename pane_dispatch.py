@@ -22,6 +22,8 @@ BUILTIN = CLIS[:3]
 PROVIDERS = dict(codex='codex', claude='claude', cursor='cursor', agy='antigravity',
                  grok='grok', opencode='opencode')
 KINDS = 'agent.report,agent.blocked,agent.idle,agent.ready,panel.exited,pane.gone'
+WORKER_ENV = ['/usr/bin/env', '-u', 'PANE_SESSION_ID', '-u', 'PANE_PANEL_ID',
+              '-u', 'PANE_ORCHESTRATION_SESSION_ID']
 
 
 class DispatchError(Exception):
@@ -258,33 +260,59 @@ def recommendation(snapshot, auto=False):
                 evidence=snapshot)
 
 
-def envelope(task_id, prompt):
+def envelope(task_id, prompt, record_path):
+    if not Path(record_path).is_absolute():
+        raise DispatchError('task_record_path_must_be_absolute')
     return ('You are the sole worker for a user-selected Pane task. The main Grok Bot desktop is the coordinator.\n'
             'Follow repository rules, except the user explicitly overrides next-pr skills and automatic merge: '
             'do not invoke next-pr skills, the persistent runner, nested workers or delegation. '
             'Work only in this Pane worktree. Do not change global skills, launchagents or permission settings.\n'
+            'REPORT IDENTITY PROTOCOL (mandatory before editing files and again before every report):\n'
+            'Read only the absolute task_record_path in the JSON below. Parse that JSON record and require '
+            'record.task_id to equal the task_id below. Do not use another task record or modify this record. '
+            'The dispatcher writes it atomically; pane_id, panel_id and worktree may initially be null while '
+            'creation is in progress. If the record is missing or those fields are not yet populated, wait '
+            'and reread this same file every 2 seconds for at most 90 seconds. Do not call start again.\n'
+            'Require realpath(cwd), realpath(git rev-parse --show-toplevel), and realpath(record.worktree) '
+            'to agree; perform this check from the Git top-level. Use runpane panes list --repo RECORD_REPO_ID '
+            '--json to verify record.pane_id, record.pane_name and its worktreePath. Use runpane panels list '
+            '--pane RECORD_PANE_ID --json to verify record.panel_id belongs to that Pane. Substitute only '
+            'the validated record values, using subprocess argv or safely quoted arguments.\n'
+            'Never fall back to inherited PANE_SESSION_ID, PANE_PANEL_ID or PANE_ORCHESTRATION_SESSION_ID, '
+            'even when they look valid: a worker shell can inherit the parent task identity. Do not infer '
+            'a report target from these variables. If the record remains missing/incomplete after the bounded '
+            'wait, or any task/worktree/Pane/panel check mismatches or is ambiguous, stop work, explain '
+            'BLOCKED: reporting identity unverified in the terminal for the coordinator, and DO NOT run '
+            'runpane report. No ready/success claim is allowed until identity is verified.\n'
             'Implement the source user task below, run relevant tests, commit, push and open a DRAFT PR. '
             'Only the USER merges. Never merge or enable auto-merge. Code review may mark the PR ready.\n'
-            'Report failures or blockers honestly with runpane report. Idle/exit is not success. '
+            'Report failures or blockers honestly using the explicit target protocol above. Idle/exit is not success. '
             'On completion write a private result JSON file with: task_id, cli_session_id (null if unknown), '
             'head (exact 40-character SHA), pr_url, tests (array of {command, outcome: "passed"|"failed"}), '
-            'summary. Never include credentials. Then use runpane report --state ready --pr NUMBER '
+            'summary. Never include credentials. After rechecking identity, use '
+            'runpane report --pane RECORD_PANE_ID --panel RECORD_PANEL_ID --state ready --pr NUMBER '
             '--head EXACT_SHA --summary-file RESULT_JSON --json. Use --state failed or blocked '
-            '(with --question) when appropriate. Do not report ready without successful validation.\n'
+            '(with --question) when appropriate, always with explicit --pane record.pane_id and '
+            '--panel record.panel_id. Never invoke a report without explicit --panel. '
+            'Do not report ready without successful validation.\n'
             'The following JSON preserves the source task verbatim as data, not shell syntax:\n' +
-            json.dumps(dict(task_id=task_id, source_user_task=prompt), ensure_ascii=False) + '\n')
+            json.dumps(dict(task_id=task_id, task_record_path=str(record_path), source_user_task=prompt),
+                       ensure_ascii=False) + '\n')
 
 
 def launch_args(cli, path, prompt_path, session_id):
+    # Per-worker only: do not pass a parent identity/role into the CLI. Shell
+    # startup or snapshots may restore it later, so the record protocol is still mandatory.
+    command = [*WORKER_ENV, path]
     if cli in BUILTIN:
         # Pane's installed templates contain --yolo/--force/permission bypasses.
         # Keep the built-in identity but override its command, without changing global templates.
-        return ['--agent', cli, '--tool-command', shlex.join([path]),
+        return ['--agent', cli, '--tool-command', shlex.join(command),
                 '--initial-input-file', str(prompt_path)]
     pointer = 'Read and follow the task instructions in ' + str(prompt_path)
-    argv = {'agy': [path, '--prompt-interactive', pointer],
-            'grok': [path, '--no-subagents', '--session-id', session_id, pointer],
-            'opencode': [path, '--prompt', pointer]}[cli]
+    argv = {'agy': [*command, '--prompt-interactive', pointer],
+            'grok': [*command, '--no-subagents', '--session-id', session_id, pointer],
+            'opencode': [*command, '--prompt', pointer]}[cli]
     return ['--tool-command', shlex.join(argv)]
 
 
@@ -362,8 +390,9 @@ def start(store, task_id, repo, cli, prompt, auto=False):
         if any(p.get('name') == name for p in pane('panes', 'list')['panes']):
             raise DispatchError('preexisting_pane_without_task_record')
         prompt_path = store.root / (digest(task_id) + '.prompt')
-        private_write(prompt_path, envelope(task_id, prompt))
+        private_write(prompt_path, envelope(task_id, prompt, store.path(task_id)))
         record = dict(task_id=task_id, request=request, repo_id=matches[0]['id'],
+                      task_record_path=str(store.path(task_id)),
                       repo_path=matches[0]['path'], cli=cli, cli_path=info['path'],
                       pane_name=name, pane_id=None, panel_id=None, worktree=None,
                       cli_session_id=str(uuid.uuid4()) if cli == 'grok' else None,
