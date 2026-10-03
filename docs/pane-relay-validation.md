@@ -6,9 +6,10 @@ The actual supervising owner is **總 · Eng in Grok Bot desktop**; the user rou
 through Eng after initial setup. The parent owns installing the persistent checkout and
 updating both the main Bot and Eng’s supervision profile. **The real test disproved the
 earlier claim that Shell completion reliably wakes the Bot.** CLI `wait` remains useful
-for bounded observation, but cannot provide cross-turn supervision by itself. Parent is
-configuring a native `UpdateState` routine; its actual ID, schedule and unattended tick
-verification are still pending. No native routine has been verified by this worker.
+for bounded observation, but cannot provide cross-turn supervision by itself. Parent verified the native `UpdateState` routine **`pane-cli-eng`** in desktop UI:
+**enabled** (Pause button), **`@every 5m` / Every 5 minutes**. Five minutes is the native
+minimum. Parent will update this same routine to the new wait/reply contract after installation
+and perform the end-to-end smoke test; UI verification alone is not that acceptance test.
 
 ## Install and verify (parent)
 
@@ -38,7 +39,7 @@ relay the final evidence, even if another observer already persisted `reported_r
 On handoff, the old owner removes the task from its recovery set; the new owner preserves
 and verifies the existing Shell handle, pending question and notified fingerprints.
 
-## Cross-turn wake boundary: real evidence and pending activation
+## Cross-turn wake boundary: failed callback and verified routine configuration
 
 Parent’s real test: background Shell handle **138984**, **18:48:28–18:49:14**, 46 seconds,
 exit 0, empty output. It did **not** wake Grok Bot/Eng after final. The next wake was the
@@ -48,22 +49,26 @@ the earlier Bot assertion and the previous version of these docs. Neither an end
 wake. `AwaitShell` waits only within the current turn. Do not report “monitoring restored”
 from a Shell handle, successful process exit, `wait_argv`, or a routine-creation claim.
 
-Parent is configuring **one existing native UpdateState routine for the owner**, with
-requested cadence **every minute**. No old runner, custom scheduler or Python daemon is
-introduced. The API names are `Shell`, `AwaitShell`, `UpdateState`; use the actual desktop
-schema, without invented callback/schedule arguments. Activation evidence is pending:
+Parent verified **one existing native UpdateState routine for 總 · Eng** in desktop UI.
+No old runner, custom scheduler or Python daemon is introduced. The API names are `Shell`,
+`AwaitShell`, `UpdateState`; use the actual desktop schema, without invented arguments.
 
-| Required evidence | Status |
+| Evidence | Status |
 | --- | --- |
-| Actual routine ID | Await parent receipt/readback. |
-| Stored schedule | Requested every minute; actual value awaits parent verification. |
-| Enabled state and owner/task scope | Await readback; only this Bot’s owned runnable tasks. |
-| Unattended tick after Bot final, without a new user message | Not yet verified. |
-| Idle disable / same-ID re-enable after start or reply | Await parent end-to-end verification. |
+| Actual routine ID | `pane-cli-eng`, verified by parent in desktop UI. |
+| Stored schedule | `@every 5m` / Every 5 minutes; **five minutes is the native minimum**, not one minute. |
+| Enabled state | Enabled; UI shows the **Pause** button. |
+| Current owner/task scope | 總 · Eng; only owned `tcg-staff-default-path-copy`. Current text checks status + last-message/screen and dedupes by panel/fingerprint. |
+| Idle disable / same-ID re-enable | Present in the verified routine text: disable with no runnable owned tasks; re-enable after start/reply. |
+| New dispatcher integration | Parent will update the same routine to wait/reply after installation, then test unattended delivery and disable/re-enable end to end. |
+
+Unattended observation can take **up to five minutes until the next scheduled check**, plus
+tool execution time. Active foreground status/wait calls can observe updates promptly.
+Never promise realtime callbacks or reliable background Shell completion wakeups.
 
 The native routine contract is:
 
-1. Each minute, consider only owned tasks still needing observation. Skip waiting_user,
+1. Every five minutes, consider only owned tasks still needing observation. Skip waiting_user,
    cancelled, terminal/error and unknown-delivery tasks awaiting inspection. Read `status`;
    use bounded `wait` only as needed, without overlapping ticks or multiple waits per task.
    Reconcile any existing Shell handle before another wait. Timeout output stays silent.
@@ -83,8 +88,9 @@ The native routine contract is:
    in Bot state. Keep receipts in UpdateState, a private `receipts/` subdirectory or outside
    the dispatcher root; never create receipt JSON beside root `*.json` task records.
 
-Until the actual routine ID/schedule and unattended tick are verified, cross-turn relay is
-**pending integration verification**, not solved by the CLI alone. The detailed owner
+The routine ID, schedule and enabled state are **UI-verified by parent**. Installation,
+updating that routine to the new dispatcher commands, and end-to-end acceptance remain
+with parent; CLI wait alone does not solve cross-turn wake. The detailed owner
 bootstrap and tick result table are in [the dispatcher guide](pane-dispatch.zh-Hant.md).
 Parent supplies the receipts and installs the contract in both main Bot and 總 · Eng. This
 worker does not configure the routine or change desktop state. Parent may stop only the
@@ -124,9 +130,10 @@ This fix PR remains draft as requested.
 1. Use the parent's prepared private prompt unchanged; select a disposable saved repo and
    a unique task ID owned by Eng. Do not reuse the business task ID.
 2. `pane-dispatch start --task-id relay-acceptance-UNIQUE --repo REPO --cli claude --prompt-file /private/tmp/pane-relay-smoke-task.txt`
-3. First obtain and verify the existing native routine ID, stored every-minute schedule,
-   owner scope and enabled state. Start/re-enable that same routine for the owned smoke
-   task. Let Eng finish its turn; without sending any new message, verify a scheduled tick
+3. After installation, update the existing `pane-cli-eng` instructions to this wait/reply
+   contract; retain `@every 5m`, verify owner scope, and enable that same routine for the owned
+   smoke task. Let Eng finish its turn; without sending any new message, allow up to five
+   minutes for the next scheduled check and verify the tick
    actually wakes Eng, reads status/wait and forwards the red/blue question once. Save the
    tick/delivery receipt outside root task JSON. The task then enters waiting_user; verify
    subsequent ticks do not repeat it, and the routine disables if nothing else is runnable.
@@ -196,7 +203,7 @@ bound dispatcher replies to that exact panel. Results:
 The inert-menu addition passed **83 tests**; the subsequent answered-transcript, terminal
 wakeup and receipt-isolation regressions bring the full suite to **86 passing tests**. The business task was not read or mutated
 for this menu test. The parent’s real ordinary-Claude question/reply test remains with Eng
-following installation, using the native routine contract above; activation remains pending verification.
+following installation and updating the UI-verified `pane-cli-eng` routine to the contract above.
 
 ## Navigation boundary and lock deadline checks
 

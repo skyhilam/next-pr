@@ -1,6 +1,6 @@
 # Pane CLI dispatcher
 
-主 Grok Bot **桌面的「總 · Eng」對話**負責協調（使用者完成初始設定後經 Eng 派工）；`pane-dispatch` 只執行一次命令，不是排程器。跨回合監看還需要經驗證的原生 routine；目前等 parent 驗證。
+主 Grok Bot **桌面的「總 · Eng」對話**負責協調（使用者完成初始設定後經 Eng 派工）；`pane-dispatch` 只執行一次命令，不是排程器。跨回合監看使用原生 routine；parent 已在桌面 UI 核對 `pane-cli-eng` 啟用、`@every 5m`。安裝新版後仍由 parent 更新 routine 指令並測試完整轉發。
 預設先建議 CLI，**等使用者選擇才開始**。使用者明確指定 CLI 即視為已選；
 只有使用者明確允許自動選擇，才使用 `--auto`。
 每個任務由 Pane 建立自己的 worktree。Worker 測試、commit、push、依來源任務指定開 draft 或 ready PR；
@@ -34,8 +34,8 @@ ln -s "$PWD/bin/pane-dispatch" "$HOME/.local/bin/pane-dispatch"
 > 把原始任務原文寫入私有 prompt 檔，以穩定 task-id 執行 start。
 > start 只是開始，不是完成。CLI wait 只提供 bounded 觀察，不能自己喚醒已結束回合的 Bot。
 > 真實測試未收到 Shell completion 喚醒；不可再宣稱背景 Shell／wait_argv 已提供跨回合監看。
-> 使用 parent 設定並驗證的原生 UpdateState routine，每分鐘只檢查本 Bot 擁有／接收 handoff 的 runnable task。
-> routine ID、實際 schedule／enabled 狀態及無新使用者訊息的 tick 證據未驗證前，明說跨回合監看尚未確認。
+> 使用 parent 已在 UI 核對的原生 UpdateState routine pane-cli-eng（啟用、@every 5m），只檢查本 Bot 擁有／接收 handoff 的 runnable task。
+> 原生最短週期為 5 分鐘；無人值守最多等 5 分鐘到下一次檢查，前景可立即 status/wait。不可承諾即時 callback；新版完整轉發由 parent 安裝後測試。
 > active 是共用 dispatcher 的全域快照，必須先依 owned_task_ids 過濾，不可全部接管或建立重複 waiter。
 > routine 每次讀 status，必要時用 wait --timeout-seconds 45；timeout 靜默留待下一 tick，不依賴 completion callback。
 > 用 task_id + event_id／result fingerprint 對照本 owner 已通知記錄；新問題／選項／permission prompt 原文連 Pane link 轉發一次。
@@ -61,22 +61,24 @@ ln -s "$PWD/bin/pane-dispatch" "$HOME/.local/bin/pane-dispatch"
 
 因此根因包含**缺少已驗證的跨回合觀察入口**。單把無限 `watch --follow` 改成 bounded wait
 並未解決這個邊界。`status`／`wait`／`reply` 解決 CLI 觀察與回覆；回合結束後，必須由經驗證的
-原生 routine 喚醒 Bot 再呼叫它們。parent 正透過 `UpdateState` 配置每分鐘 routine；本修復
+原生 routine 喚醒 Bot 再呼叫它們。parent 已在桌面 UI 核對 `UpdateState` routine，原生最短週期為 5 分鐘；本修復
 不新增 Python daemon、舊 scheduler 或任何自製持久程序，也不代替 parent 配置桌面。
 
-### 啟用狀態（待 parent 驗證）
+### 啟用狀態（parent 已核對桌面 UI）
 
 | 項目 | 目前證據 |
 | --- | --- |
-| routine ID | **待 parent 提供**，不可虛構或每 task 建一個。 |
-| requested cadence | 每分鐘；實際儲存的 schedule 尚待核對。 |
-| enabled／disabled 狀態 | 待 parent 核對原生狀態與 runnable task。 |
-| unattended tick | 待證明 Bot final 後、沒有新外部訊息時，原生 routine 真正執行並轉發結果。 |
+| owner／routine ID | 總 · Eng／`pane-cli-eng`；沿用同一 ID，不可每 task 建一個。 |
+| stored schedule | `@every 5m`，UI 顯示 Every 5 minutes；原生最短週期為 **5 分鐘**，不是 1 分鐘。 |
+| enabled 狀態 | 已啟用，UI 顯示 **Pause** 按鈕。 |
+| 目前指令／範圍 | 只處理 owned `tcg-staff-default-path-copy`，讀 status + last-message/screen、panel/fingerprint 去重；無 runnable owned task 時停用，start/reply 後重新啟用。 |
+| 新版整合 | parent 安裝後將同一 routine 更新為下述 wait/reply 契約，再測試無新使用者訊息的完整轉發與停用／重新啟用。 |
 | Shell callback | 真實測試沒有喚醒；不能作為可靠監看承諾。 |
 
-parent 提供實際 ID、schedule、enabled readback 及 unattended tick 證據後才更新這張表；
-「已送出 UpdateState」不是驗證。尚未完成前，應說明監看仍需目前回合／人工恢復，不能宣稱
-已修好跨回合 unattended relay。後續若另有 callback 證據，也須重新實測，不能恢復舊假設。
+以上是 parent 提供的 UI 設定驗證，不是本 worker 宣稱已完成新版端到端測試。
+無人值守最多等 **5 分鐘**才到下一次排程檢查（另加工具執行時間）；目前回合可立即使用
+status／bounded wait 及時觀察。不要承諾即時 callback，也不要把 UI 啟用或 Shell 正常結束當作
+已成功交付結果。parent 仍負責新版安裝、routine 指令更新及實際 smoke test。
 
 ### routine 每次執行的契約
 
@@ -90,14 +92,14 @@ status 已把它標為 reported_ready 就漏掉最後通知。未有 owner／歸
 
 runnable 指仍需觀察且不在 waiting_user、cancelled、terminal/error、unknown-delivery 人工檢查
 狀態的 owned task。routine 只對 runnable task 讀 `status`，必要時執行 bounded
-`wait --task-id ID --timeout-seconds 45`；通常 status 足以避免每分鐘 tick 佔用過長。
+`wait --task-id ID --timeout-seconds 45`；通常 status 足以避免每 5 分鐘 tick 佔用過長。
 每 task 最多一個進行中的 wait，存在舊 Shell handle 要先核對，不能重開；routine tick 亦不可
 重疊處理相同 task。一次檢查未完成時，下一 tick 不另開第二份。timeout 不對使用者洗訊息，
 保持 runnable 等下一次原生 tick；不靠背景 Shell 完成來連鎖 rearm。
 
 | 觀察結果 | owner 動作 |
 | --- | --- |
-| 新進度，仍在工作／wait timeout | 保存證據，保持 runnable；下一分鐘再檢查，timeout 不通知使用者。 |
+| 新進度，仍在工作／wait timeout | 保存證據，保持 runnable；下一個 5 分鐘 tick 再檢查，timeout 不通知使用者。 |
 | 新問題／選單／permission prompt | 原文 excerpt/options + Pane link 轉發一次，保存 task/event，轉 waiting_user；後續 tick 跳過該 task。 |
 | 已通知 fingerprint／consumed transcript | 不重複轉發，不重新索取許可；不把 worker busy 當成新問題。 |
 | idle 無 report，無法辨認問題 | 只呈現 needs_attention／terminal evidence 一次，停下等檢查，不編造問題或完成。 |
@@ -111,15 +113,15 @@ terminal error。訊息／通知 receipts 存 UpdateState、私有 `receipts/` �
 不得放 root `*.json` task scan。
 
 沒有任何 runnable owned task（例如全在 waiting_user）時，停用**同一** routine；仍有其他
-runnable owned task 就繼續每分鐘執行，但跳過 waiting_user。start 或成功送出的
+runnable owned task 就繼續每 5 分鐘執行，但跳過 waiting_user。start 或成功送出的
 `action:submit` reply 後，清除該 task pending、標記 runnable、重新啟用已驗證的同一 routine ID，
 可先在目前回合立即 status/wait；不要按每 task／每 reply 重建 routine。
 `action:navigate` 保留選單 pending，先 status 再依已授權選擇送下一鍵，不重問許可。
 `sent` 不等於 resumed，仍需後續活動／report 證據；unknown reply 停下檢查，不自動重試。
 使用者 cancel 停止該 task 監看，不自行翻譯成任意 terminal 中斷或業務動作。
 
-parent 負責原生 routine 的設定／驗證與 main Bot、總 · Eng profile 安裝；本 worker 等待實際
-routine ID 與 schedule 證據。parent 如需停用舊 watch，必須先核對其確切 handle／命令／owner，
+parent 負責新版安裝、main Bot／總 · Eng profile 更新，並將已核對的 `pane-cli-eng` 更新為
+新版 wait/reply 契約、完成 smoke test。parent 如需停用舊 watch，必須先核對其確切 handle／命令／owner，
 只停止那一個，不批次 kill runpane。使用者的 `go ready` 已經由 Eng 送出，業務 Claude 正在工作；
 不得重送。先前的暫時 bounded watch 不是已驗證跨回合監看，轉接 routine 由 parent 協調。
 
