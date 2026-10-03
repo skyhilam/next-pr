@@ -14,6 +14,28 @@ tick at **19:01** with no new user input: Eng relayed a vendor permission menu. 
 the user answered, Eng sent Down + Enter, and Claude resumed phpunit. This verifies native
 routine wake and that live menu recovery, not the still-pending new-dispatcher smoke test.
 
+## Final integration handoff
+
+Parent tested an isolated candidate containing the `menu_context` fix against the actual
+Claude read-permission menu. Two consecutive real status reads returned
+`same_event=true`, `same_content=true`, `replyable=true`, and
+`fingerprint_provenance=pane_menu_dialog`. No key was sent. This verifies stable real-menu
+observation; it does **not** establish ordinary question/reply acceptance.
+
+Final code review and persistent-checkout installation can proceed. Parent's Bot profile
+update and ordinary-question smoke continuation are currently blocked externally:
+
+- Grok Bot is running but has no accessible window (`cgWindowNotFound`); parent asked the
+  user to reopen it.
+- Automatic approval review rejected the one-time prompt-read approval because explicit
+  user authorization is required; parent asked the user and that answer is pending.
+
+Do not send fixture keys, approve the read, retry unknown delivery, or claim the ordinary
+question/reply test passed. Parent owns those next steps after the external blockers clear.
+Parent separately observed original business recovery and PR230; that is distinct from
+this smoke acceptance. All code fixes are included, with 105 passing tests at the last
+code head; this handoff update changes documentation only.
+
 ## Install and verify (parent)
 
 The existing executable symlink points to
@@ -102,7 +124,7 @@ Parent supplies the receipts and installs the contract in both main Bot and 總 
 worker does not configure the routine or change desktop state. Parent may stop only the
 exact obsolete watch process after confirming handle/command/owner; no broad process kill.
 
-The user’s **go ready** has already been delivered in Eng and business Claude is running.
+The user’s **go ready** was already delivered in Eng; parent subsequently observed business recovery and PR230.
 Do not resend it, recreate the task, or duplicate the observer. The temporary bounded watch
 is not proof of unattended supervision; parent coordinates its transition to the verified
 native routine.

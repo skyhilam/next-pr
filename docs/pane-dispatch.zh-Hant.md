@@ -82,6 +82,17 @@ ln -s "$PWD/bin/pane-dispatch" "$HOME/.local/bin/pane-dispatch"
 status／bounded wait 及時觀察。不要承諾即時 callback，也不要把 UI 啟用或 Shell 正常結束當作
 已成功交付結果。parent 仍負責新版安裝、routine 指令更新及實際 smoke test。
 
+### 最後整合驗證狀態
+
+parent 的 isolated candidate 在真實 Claude read permission menu 連續讀取兩次 status，
+得到 `same_event=true`、`same_content=true`、`replyable=true`、
+`fingerprint_provenance=pane_menu_dialog`，沒有送鍵。這只驗證穩定觀察，ordinary question/reply
+acceptance 尚未通過。code review／安裝可繼續；Bot profile 更新與 live smoke 目前受外部阻擋：
+Grok Bot 雖在執行但沒有可存取視窗（`cgWindowNotFound`），parent 已請使用者重開；
+一次性 prompt read approval 被 automatic approval review 要求明確使用者授權，parent 已詢問、
+仍待回答。本 worker 不送 fixture keys、不批准 read。原 business recovery／PR230 已由 parent
+另外觀察，不能當作本 smoke test 通過。
+
 ### routine 每次執行的契約
 
 使用 `UpdateState` 保存 owner 的 task ID 集合、每 task 的 pending／已通知 fingerprint、
@@ -127,7 +138,7 @@ runnable owned task 就繼續每 5 分鐘執行，但跳過 waiting_user。start
 
 parent 負責新版安裝、main Bot／總 · Eng profile 更新，並將已核對的 `pane-cli-eng` 更新為
 新版 wait/reply 契約、完成 smoke test。parent 如需停用舊 watch，必須先核對其確切 handle／命令／owner，
-只停止那一個，不批次 kill runpane。使用者的 `go ready` 已經由 Eng 送出，業務 Claude 正在工作；
+只停止那一個，不批次 kill runpane。使用者的 `go ready` 已經由 Eng 送出，parent 後續已觀察 business recovery 與 PR230；
 不得重送。先前的暫時 bounded watch 不是已驗證跨回合監看，轉接 routine 由 parent 協調。
 
 ## 使用
