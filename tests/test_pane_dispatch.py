@@ -26,6 +26,11 @@ class FakePane:
         self.events = []
         self.failure = None
         self.cost = {'ok': True, 'panes': []}
+        self.message = ''
+        self.screen = ''
+        self.activity = None
+        self.sends = []
+        self.send_failure = None
 
     def __call__(self, *args, **kwargs):
         cmd = args[:2]
@@ -51,6 +56,16 @@ class FakePane:
                                    initialInput={'verifiedSubmitted': True, 'delivery': 'taken'})]}
         if cmd == ('panels', 'list'):
             return {'panels': self.panels}
+        if cmd in (('panels', 'last-message'), ('panels', 'screen')):
+            return dict(ok=True, paneId='pane-1', panelId='panel-1',
+                        text=self.message if cmd[1] == 'last-message' else self.screen,
+                        state=dict(activityStatus=self.activity, isCliPanel=True))
+        if cmd in (('panels', 'submit'), ('panels', 'input')):
+            self.sends.append(args)
+            if self.send_failure:
+                raise d.DispatchError(self.send_failure)
+            return dict(ok=True, verifiedSubmitted=True, verification='observed',
+                        delivery=dict(state='taken', evidence='transcript')) if cmd[1] == 'submit' else dict(ok=True)
         if args[0] == 'watch':
             return self.events
         if cmd == ('panes', 'cost'):
