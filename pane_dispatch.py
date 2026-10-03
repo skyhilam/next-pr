@@ -2,6 +2,7 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -14,6 +15,8 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
+from urllib.parse import urlencode
 import uuid
 
 CLIS = ('codex', 'claude', 'cursor', 'agy', 'grok', 'opencode')
@@ -21,7 +24,9 @@ BUILTIN = CLIS[:3]
 # These are worker CLIs: xAI's Grok CLI is distinct from Grok Bot desktop.
 PROVIDERS = dict(codex='codex', claude='claude', cursor='cursor', agy='antigravity',
                  grok='grok', opencode='opencode')
-KINDS = 'agent.report,agent.blocked,agent.idle,agent.ready,panel.exited,pane.gone'
+KINDS = 'agent.report,agent.blocked,agent.idle,agent.ready,agent.busy,panel.exited,pane.gone'
+DEADLINE = ContextVar('deadline', default=None)
+TEXT_LIMIT = 12000
 WORKER_ENV = ['/usr/bin/env', '-u', 'PANE_SESSION_ID', '-u', 'PANE_PANEL_ID',
               '-u', 'PANE_ORCHESTRATION_SESSION_ID']
 
@@ -77,6 +82,10 @@ def run(argv, timeout=25, ndjson=False, with_exit=False):
 
 
 def pane(*args, timeout=25, ndjson=False):
+    if DEADLINE.get() is not None:
+        timeout = min(timeout, DEADLINE.get() - time.monotonic())
+        if timeout <= 0:
+            raise DispatchError('wait_deadline')
     path = executable('runpane')
     if not path:
         raise DispatchError('runpane_missing')
@@ -117,11 +126,20 @@ class Store:
         self.root.chmod(0o700)
 
     @contextmanager
-    def locked(self):
-        fd = os.open(self.root / 'lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    def locked(self, task_id=None):
+        name = digest(task_id) + '.lock' if task_id is not None else 'lock'
+        fd = os.open(self.root / name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
             os.fchmod(fd, 0o600)
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = (DEADLINE.get() - time.monotonic()) if DEADLINE.get() else 0.05
+                    if remaining <= 0:
+                        raise DispatchError('wait_deadline')
+                    time.sleep(min(0.05, remaining))
             yield
         finally:
             os.close(fd)
@@ -148,13 +166,13 @@ class Store:
 def cli_info(name):
     path = executable(name)
     result = dict(cli=name, path=path, available=bool(path), quota_group=PROVIDERS[name])
-    if path and name not in BUILTIN:
+    if path and (name not in BUILTIN or name == 'claude'):
         try:
             proc = subprocess.run([path, '--help'], stdin=subprocess.DEVNULL,
                                   capture_output=True, text=True, timeout=10, shell=False)
             help_text = proc.stdout + proc.stderr
             required = {'agy': ('--prompt-interactive',), 'grok': ('[PROMPT]', '--no-subagents', '--session-id'),
-                        'opencode': ('--prompt',)}[name]
+                        'opencode': ('--prompt',), 'claude': ('[prompt]',)}[name]
             result['available'] = proc.returncode == 0 and all(flag in help_text for flag in required)
             if not result['available']:
                 result['error'] = 'unsupported_cli_help'
@@ -260,7 +278,7 @@ def recommendation(snapshot, auto=False):
                 evidence=snapshot)
 
 
-def envelope(task_id, prompt, record_path):
+def envelope(task_id, prompt, record_path, pr_mode=None):
     if not Path(record_path).is_absolute():
         raise DispatchError('task_record_path_must_be_absolute')
     return ('You are the sole worker for a user-selected Pane task. The main Grok Bot desktop is the coordinator.\n'
@@ -284,8 +302,11 @@ def envelope(task_id, prompt, record_path):
             'wait, or any task/worktree/Pane/panel check mismatches or is ambiguous, stop work, explain '
             'BLOCKED: reporting identity unverified in the terminal for the coordinator, and DO NOT run '
             'runpane report. No ready/success claim is allowed until identity is verified.\n'
-            'Implement the source user task below, run relevant tests, commit, push and open a DRAFT PR. '
-            'Only the USER merges. Never merge or enable auto-merge. Code review may mark the PR ready.\n'
+            'Implement the source user task below, run relevant tests, commit, push and open a PR. '
+            'The source user task controls draft/ready readiness and overrides the fallback. '
+            f'Fallback PR mode: {pr_mode or "draft"}; use it only when the source task has no explicit readiness instruction. '
+            'Do not ask again for actions the user already authorized. '
+            'Only the USER merges. Never merge or enable auto-merge.\n'
             'Report failures or blockers honestly using the explicit target protocol above. Idle/exit is not success. '
             'On completion write a private result JSON file with: task_id, cli_session_id (null if unknown), '
             'head (exact 40-character SHA), pr_url, tests (array of {command, outcome: "passed"|"failed"}), '
@@ -304,6 +325,12 @@ def launch_args(cli, path, prompt_path, session_id):
     # Per-worker only: do not pass a parent identity/role into the CLI. Shell
     # startup or snapshots may restore it later, so the record protocol is still mandatory.
     command = [*WORKER_ENV, path]
+    if cli == 'claude':
+        pointer = ('Please carry out the user-authorized task in the Pane worktree identified by '
+                   'the task record in ' + str(prompt_path) + '. Read that private instructions file, '
+                   'verify the recorded PATH and identity, then execute the original user task. '
+                   'Honor its explicit draft/ready choice. Never merge or enable auto-merge.')
+        return ['--agent', cli, '--tool-command', shlex.join([*command, pointer])]
     if cli in BUILTIN:
         # Pane's installed templates contain --yolo/--force/permission bypasses.
         # Keep the built-in identity but override its command, without changing global templates.
@@ -330,18 +357,28 @@ def reconcile(record):
             str(match.get('repoId', record['repo_id'])) != str(record['repo_id'])):
         record['reconcile_error'] = 'worktree_unverified'
         return
+    if record.get('worktree') and Path(record['worktree']).resolve() != Path(match['worktreePath']).resolve():
+        record['reconcile_error'] = 'worktree_identity_changed'
+        return
     record.update(pane_id=match['id'], worktree=match['worktreePath'])
     record.pop('reconcile_error', None)
     if record['state'] == 'creation_unknown':
         record['state'] = 'needs_inspection'
 
 
-def start(store, task_id, repo, cli, prompt, auto=False):
+def start(store, task_id, repo, cli, prompt, auto=False, pr_mode=None):
+    with store.locked(task_id):
+        return _start(store, task_id, repo, cli, prompt, auto, pr_mode)
+
+
+def _start(store, task_id, repo, cli, prompt, auto=False, pr_mode=None):
     if bool(cli) == bool(auto):
         raise DispatchError('select_explicit_cli_or_auto')
     if not task_id or len(task_id) > 200:
         raise DispatchError('invalid_task_id')
     request = dict(repo=repo, selection=cli or 'auto', prompt_sha256=digest(prompt))
+    if pr_mode:
+        request['pr_mode'] = pr_mode
     with store.locked():
         existing = store.get(task_id)
         if existing:
@@ -390,13 +427,14 @@ def start(store, task_id, repo, cli, prompt, auto=False):
         if any(p.get('name') == name for p in pane('panes', 'list')['panes']):
             raise DispatchError('preexisting_pane_without_task_record')
         prompt_path = store.root / (digest(task_id) + '.prompt')
-        private_write(prompt_path, envelope(task_id, prompt, store.path(task_id)))
+        private_write(prompt_path, envelope(task_id, prompt, store.path(task_id), pr_mode))
         record = dict(task_id=task_id, request=request, repo_id=matches[0]['id'],
                       task_record_path=str(store.path(task_id)),
                       repo_path=matches[0]['path'], cli=cli, cli_path=info['path'],
                       pane_name=name, pane_id=None, panel_id=None, worktree=None,
                       cli_session_id=str(uuid.uuid4()) if cli == 'grok' else None,
                       state='creation_unknown', created_at=now(), pr=None, evidence=None,
+                      pr_mode=pr_mode, pr_mode_policy='source_task_overrides_fallback',
                       selection_evidence=selection_evidence)
         launch = launch_args(cli, info['path'], prompt_path, record['cli_session_id'])
         record['launch_command'] = launch[launch.index('--tool-command') + 1]
@@ -456,63 +494,278 @@ def report_evidence(report, task_id):
     return result
 
 
+def journal(record, timeout_ms=0):
+    events = pane('watch', '--pane', record['pane_id'], '--since', str(record.get('watch_cursor', 0)),
+                  '--timeout-ms', str(timeout_ms), '--kinds', KINDS, '--include-shells',
+                  ndjson=True, timeout=timeout_ms / 1000 + 2)
+    generations = [e['gen'] for e in events if type(e.get('gen')) is int]
+    if any(e.get('kind') == '_reset' for e in events):
+        record['watch_cursor'] = 0
+    if generations:
+        record['watch_cursor'] = max(generations)
+    record['journal_warnings'] = [e['kind'] for e in events if e.get('kind') in ('_reset', '_dropped', '_error')]
+    scoped = [e for e in events if e.get('paneId') == record['pane_id'] and
+              (e.get('panelId') == record.get('panel_id') or e.get('kind') == 'pane.gone')]
+    record['events'] = (record.get('events', []) +
+                        [pick(e, ('gen', 'at', 'kind', 'exitCode')) for e in scoped])[-50:]
+    return scoped
+
+
+def panel_identity(record):
+    reconcile(record)
+    if record.get('reconcile_error'):
+        raise DispatchError(record['reconcile_error'])
+    repos = pane('repos', 'list')['repos']
+    if not any(str(r['id']) == str(record['repo_id']) and
+               Path(r['path']).resolve() == Path(record['repo_path']).resolve() for r in repos):
+        raise DispatchError('repo_identity_changed')
+    panels = pane('panels', 'list', '--pane', record['pane_id'])['panels']
+    if not record.get('panel_id'):
+        candidates = [p for p in panels if record.get('launch_command') and
+                      p.get('launchCommand') == record['launch_command']]
+        if len(candidates) == 1:
+            record['panel_id'] = candidates[0]['id']
+    matches = [p for p in panels if p['id'] == record.get('panel_id')]
+    if len(matches) != 1 or matches[0].get('paneId', record['pane_id']) != record['pane_id']:
+        raise DispatchError('panel_identity_changed')
+    if matches[0].get('launchCommand') and matches[0]['launchCommand'] != record.get('launch_command'):
+        raise DispatchError('panel_launch_changed')
+    return matches[0]
+
+
+def checked_panel_read(record, command, limit):
+    result = pane('panels', command, '--panel', record['panel_id'], '--limit', str(limit))
+    if result.get('paneId') != record['pane_id'] or result.get('panelId') != record['panel_id']:
+        raise DispatchError('panel_read_identity_mismatch')
+    return result
+
+
+def screen_text(text):
+    # Remove ANSI, trailing whitespace and volatile spinner/timing/status chrome.
+    # This is only a terminal excerpt: never infer a question or authorization.
+    text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text or '')
+    lines = [line.rstrip() for line in text.splitlines()]
+    return '\n'.join(line for line in lines if line.strip() and not
+                    re.match(r'^\s*[✻✽✶✳✢·⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏].*(?:\d|…|\.\.\.)', line))[-TEXT_LIMIT:]
+
+
+def menu_options(text):
+    # Conservative, explicit TUI signature. Prose numbered questions alone are not a menu.
+    options = re.findall(r'^\s*[❯>›]?\s*([1-9])[.)]\s+(.+)$', text, re.M)
+    selected = bool(re.search(r'^\s*[❯>›]\s*[1-9][.)]\s+', text, re.M))
+    hint = bool(re.search(r'(?:↑|↓|arrow keys|enter to (?:select|confirm)|select an option)', text, re.I))
+    return [dict(key=key, text=value) for key, value in options] if len(options) >= 2 and (selected or hint) else []
+
+
+def observe(record):
+    panel = panel_identity(record)
+    try:
+        scoped = journal(record)
+        record.pop('watch_error', None)
+    except DispatchError as exc:
+        scoped = []
+        record['watch_error'] = str(exc)
+    errors = {}
+    reads = {}
+    for command, limit in (('last-message', TEXT_LIMIT), ('screen', 80)):
+        try:
+            reads[command] = checked_panel_read(record, command, limit)
+        except DispatchError as exc:
+            if str(exc) == 'panel_read_identity_mismatch':
+                raise
+            errors[command] = str(exc)
+    if DEADLINE.get() is not None and time.monotonic() >= DEADLINE.get():
+        raise DispatchError('wait_deadline')
+    screen = reads.get('screen', {})
+    activity = pick(screen.get('state', {}), ('initialized', 'activityStatus', 'isCliReady', 'isCliPanel', 'lastActivity'))
+    record['panel_activity'] = activity
+    text = screen_text(screen.get('text', ''))
+    screen_truncated = bool(screen.get('hasMore')) or len(screen.get('text', '')) > TEXT_LIMIT
+    record['terminal_evidence'] = dict(provenance='pane_terminal_screen', source=screen.get('source'),
+                                       excerpt=text, truncated=screen_truncated,
+                                       untrusted=True)
+    options = menu_options(text)
+    message = reads.get('last-message', {})
+    content_signature = digest(message.get('text', '') if message.get('text') and not options else text)
+    report = panel.get('report')
+    evidence = report_evidence(report, record['task_id']) if report else None
+    record['evidence'] = evidence
+    report_key = digest(json.dumps(report, sort_keys=True)) if report else None
+    # Persistent reports remain visible after reply, but must not resurrect a consumed question.
+    consumed = record.get('consumed_report') == report_key and report_key is not None
+    if evidence and not consumed:
+        state = report.get('state')
+        record['state'] = ('reported_ready' if evidence['complete'] else 'incomplete_report') if state in ('ready', 'done') else (
+            'reported_' + str(state) if state in ('failed', 'blocked') else 'incomplete_report')
+        if evidence['complete']:
+            record['pr'] = dict(url=evidence['pr_url'], number=evidence['pr'], head=evidence['head'])
+            if evidence.get('cli_session_id'):
+                record['cli_session_id'] = evidence['cli_session_id']
+    else:
+        kind = scoped[-1]['kind'] if scoped else None
+        if activity.get('activityStatus') == 'active' and not options:
+            record['state'] = 'working'
+        elif activity.get('activityStatus') == 'idle' or options or kind in (
+                'agent.idle', 'agent.ready', 'agent.blocked', 'panel.exited', 'pane.gone'):
+            record['state'] = 'needs_attention'
+    source, excerpt, truncated = 'pane_terminal_screen', text, screen_truncated
+    if message.get('text') and not options:
+        source, excerpt = 'pane_agent_last_message', message['text'][-TEXT_LIMIT:]
+        truncated = bool(message.get('truncated')) or len(message['text']) > TEXT_LIMIT
+    question = None
+    if evidence and evidence.get('question') and not options and (not consumed or
+            content_signature == record.get('consumed_content_signature')):
+        source, excerpt, question = 'pane_worker_report', evidence['question'][-TEXT_LIMIT:], evidence['question'][-TEXT_LIMIT:]
+        truncated = len(evidence['question']) > TEXT_LIMIT
+    # Include activity in the event (no guessed question semantics from a stale transcript).
+    # A busy->idle cycle can return the same words as a genuinely new prompt.
+    previous = record.get('conversation') or {}
+    if (activity.get('activityStatus') == 'active' and previous.get('activity') != 'active') or any(
+            e.get('kind') == 'agent.busy' and e.get('gen', 0) > record.get('busy_generation', 0) for e in scoped):
+        record['turn_epoch'] = record.get('turn_epoch', 0) + 1
+    record['busy_generation'] = max([record.get('busy_generation', 0)] +
+                                     [e.get('gen', 0) for e in scoped if e.get('kind') == 'agent.busy'])
+    conversation = dict(provenance=source, excerpt=excerpt, question=question,
+                        options=options, truncated=truncated, untrusted=True,
+                        activity=activity.get('activityStatus'), read_errors=errors,
+                        held_input=bool(screen.get('composer', {}).get('hasUndeliveredText')),
+                        report_key=report_key, content_signature=content_signature)
+    fingerprint = dict(pane=record['pane_id'], panel=record['panel_id'], source=source,
+                       text=excerpt, options=options, epoch=record.get('turn_epoch', 0))
+    if source == 'pane_worker_report':
+        fingerprint['report'] = report_key
+    signature = digest(json.dumps(fingerprint, sort_keys=True, ensure_ascii=False))
+    if signature != record.get('conversation_signature'):
+        record['conversation_revision'] = record.get('conversation_revision', 0) + 1
+    record['conversation_signature'] = signature
+    conversation['event_id'] = digest(signature + ':' + str(record['conversation_revision']))
+    conversation['new'] = conversation['event_id'] != previous.get('event_id')
+    conversation['replyable'] = (bool(excerpt) and activity.get('isCliPanel') is True and
+                                not conversation['held_input'] and
+                                record['state'] not in ('reported_ready', 'reported_failed', 'incomplete_report') and
+                                (bool(options) or activity.get('activityStatus') == 'idle' or
+                                 (source == 'pane_worker_report' and record['state'] == 'reported_blocked')))
+    # Any send intent consumes this event, even if delivery is ambiguous.
+    if (any(r['event_id'] == conversation['event_id'] for r in record.get('replies', {}).values()) or
+            (record.get('consumed_content_signature') == content_signature and
+             record.get('consumed_report') == report_key)):
+        conversation['replyable'] = False
+        if record['state'] == 'needs_attention':
+            record['state'] = 'awaiting_reply_evidence'
+    record['conversation'] = conversation
+    record['pane_link'] = 'pane://open?' + urlencode(dict(pane=record['pane_id'], panel=record['panel_id']))
+    latest = record.get('last_reply_id')
+    if latest and activity.get('activityStatus') == 'active':
+        record['replies'][latest]['resume_evidence'] = dict(provenance='pane_panel_activity', observed_at=now(), **activity)
+    record.pop('status_error', None)
+
+
 def status(store, task_id):
-    with store.locked():
+    with store.locked(task_id):
         record = store.get(task_id)
         if not record:
             raise DispatchError('unknown_task')
         try:
-            reconcile(record)
-            if record.get('reconcile_error'):
-                raise DispatchError(record['reconcile_error'])
-            panels = pane('panels', 'list', '--pane', record['pane_id'])['panels']
-            if not record.get('panel_id'):
-                candidates = [p for p in panels if p.get('launchCommand') == record.get('launch_command') or
-                              p.get('isCliPanel') or p.get('agentType') == record['cli']]
-                if len(candidates) == 1:
-                    record['panel_id'] = candidates[0]['id']
-            panel = next((p for p in panels if p['id'] == record.get('panel_id')), {})
-            report = panel.get('report')
-            try:
-                events = pane('watch', '--pane', record['pane_id'], '--since', str(record.get('watch_cursor', 0)),
-                              '--timeout-ms', '0', '--kinds', KINDS, ndjson=True)
-                record.pop('watch_error', None)
-                generations = [e['gen'] for e in events if type(e.get('gen')) is int]
-                if generations:
-                    record['watch_cursor'] = max(generations)
-                elif any(e.get('kind') == '_reset' for e in events):
-                    record['watch_cursor'] = 0
-                record['journal_warnings'] = [e['kind'] for e in events if e.get('kind') in ('_reset', '_dropped', '_error')]
-            except DispatchError as exc:
-                events = []
-                record['watch_error'] = str(exc)
-            scoped = [e for e in events if e.get('paneId') == record['pane_id'] and
-                      e.get('panelId') == record.get('panel_id')]
-            record['events'] = (record.get('events', []) +
-                                [pick(e, ('gen', 'at', 'kind', 'exitCode')) for e in scoped])[-50:]
-            if report:
-                evidence = report_evidence(report, task_id)
-                record['evidence'] = evidence
-                state = report.get('state')
-                if state in ('ready', 'done'):
-                    record['state'] = 'reported_ready' if evidence['complete'] else 'incomplete_report'
-                else:
-                    record['state'] = 'reported_' + str(state) if state in ('failed', 'blocked') else 'incomplete_report'
-                if evidence['complete']:
-                    record['pr'] = dict(url=evidence['pr_url'], number=evidence['pr'], head=evidence['head'])
-                    if evidence.get('cli_session_id'):
-                        record['cli_session_id'] = evidence['cli_session_id']
-            elif scoped:
-                kind = scoped[-1]['kind']
-                record['state'] = {'panel.exited': 'exited_without_report', 'agent.idle': 'idle_without_report',
-                                   'agent.ready': 'idle_without_report', 'agent.blocked': 'blocked'}.get(kind, record['state'])
-            record.pop('status_error', None)
+            observe(record)
         except DispatchError as exc:
             record['status_error'] = str(exc)
-        record['watch_argv'] = ([executable('runpane'), 'watch', '--pane', record['pane_id'], '--follow',
-                                 '--quiet', '--kinds', KINDS, '--json'] if record.get('pane_id') else None)
+            record['state'] = 'needs_attention'
+            if record.get('conversation'):
+                record['conversation'].update(new=False, replyable=False, stale=True)
+        record['wait_argv'] = ['pane-dispatch', '--state-dir', str(store.root), 'wait', '--task-id', task_id,
+                               '--timeout-seconds', '45']
         store.save(record)
         return record
+
+
+def wait(store, task_id, timeout_seconds=45):
+    if not 0 < timeout_seconds <= 45:
+        raise DispatchError('timeout_seconds_must_be_between_0_and_45')
+    deadline = time.monotonic() + timeout_seconds
+    token = DEADLINE.set(deadline)
+    record = None
+    try:
+        # Baseline FIRST: the question may predate the first journal subscription.
+        while True:
+            record = status(store, task_id)
+            if record.get('status_error') in ('wait_deadline', 'process_timeout') and time.monotonic() >= deadline:
+                break
+            conversation = record.get('conversation', {})
+            if record.get('status_error') or record['state'] in ('needs_attention', 'reported_blocked',
+                    'reported_failed', 'reported_ready', 'incomplete_report') or conversation.get('new'):
+                return dict(outcome='update', task=record)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            # No state lock while blocked in the daemon. Re-read/merge cursor at next status.
+            journal(record, max(1, int(remaining * 1000)))
+            # status drains from the persisted cursor, so no wakeup can be lost here.
+    except DispatchError as exc:
+        if str(exc) not in ('wait_deadline', 'process_timeout'):
+            return dict(outcome='needs_attention', error=str(exc), task=record)
+    finally:
+        DEADLINE.reset(token)
+    return dict(outcome='timeout', task=record, task_id=task_id)
+
+
+def reply(store, task_id, reply_text, event_id, reply_id, key=None):
+    if not reply_id or len(reply_id) > 200 or not reply_text.strip() or len(reply_text) > TEXT_LIMIT:
+        raise DispatchError('invalid_reply')
+    if key is not None and key not in ('up', 'down', 'enter', *tuple('123456789')):
+        raise DispatchError('invalid_menu_key')
+    if any((ord(c) < 32 and c not in '\n\t') or 127 <= ord(c) <= 159 for c in reply_text) or reply_text.lstrip().startswith(('!', '/', '#', '@')):
+        raise DispatchError('reply_must_be_plain_text')
+    request = dict(event_id=event_id, reply_sha256=digest(reply_text), key=key)
+    with store.locked(task_id):
+        record = store.get(task_id)
+        if not record:
+            raise DispatchError('unknown_task')
+        replies = record.setdefault('replies', {})
+        if reply_id in replies:
+            existing = replies[reply_id]
+            if any(existing.get(k) != v for k, v in request.items()):
+                raise DispatchError('reply_id_request_mismatch')
+            return existing
+        observe(record)  # Validates identity and current fingerprint immediately before intent/send.
+        current = record['conversation']
+        if event_id != current['event_id'] or not current['replyable']:
+            store.save(record)
+            raise DispatchError('stale_or_unreplyable_event')
+        if current['options']:
+            if key is None:
+                raise DispatchError('menu_requires_explicit_key')
+            if key.isdigit() and key not in [option['key'] for option in current['options']]:
+                raise DispatchError('menu_key_not_present')
+        elif key is not None:
+            raise DispatchError('no_current_menu')
+        path = store.root / (digest(task_id + ':' + reply_id) + '.reply')
+        private_write(path, reply_text)
+        delivery = dict(reply_id=reply_id, **request, delivery='unknown', intent_at=now(),
+                        pane_id=record['pane_id'], panel_id=record['panel_id'], resume_evidence=None)
+        replies[reply_id] = delivery
+        record['last_reply_id'] = reply_id
+        record['consumed_report'] = current.get('report_key')
+        record['consumed_content_signature'] = current['content_signature']
+        record['state'] = 'awaiting_reply_evidence'
+        store.save(record)  # Durable unknown intent BEFORE send. A crash must never cause a resend.
+        try:
+            if key is None:
+                result = pane('panels', 'submit', '--panel', record['panel_id'], '--input-file', str(path), '--yes')
+            else:
+                payload = {'up': '\x1b[A', 'down': '\x1b[B', 'enter': '\r'}.get(key, key)
+                result = pane('panels', 'input', '--panel', record['panel_id'], '--text', payload, '--yes')
+            delivery.update(delivery='sent', sent_at=now(),
+                            evidence=pick(result, ('delivery', 'verifiedSubmitted', 'verification', 'submitted')))
+        except DispatchError as exc:
+            delivery['error'] = str(exc)
+        store.save(record)
+        return delivery
+
+
+def active(store):
+    return [pick(r, ('task_id', 'state', 'repo_id', 'worktree', 'pane_id', 'panel_id', 'pane_link',
+                     'conversation', 'last_reply_id', 'status_error', 'updated_at'))
+            for r in store.all() if r.get('state') not in ('reported_ready', 'reported_failed')]
 
 
 def usage(store, task_id):
@@ -558,13 +811,30 @@ def main(argv=None):
     selection.add_argument('--cli', choices=CLIS)
     selection.add_argument('--auto', action='store_true', help='Only when user explicitly authorized automatic choice')
     start_parser.add_argument('--prompt-file', required=True, type=Path)
+    start_parser.add_argument('--pr-mode', choices=('draft', 'ready'), help='Fallback only; explicit source-task instruction wins')
+    subs.add_parser('active')
+    wait_parser = subs.add_parser('wait')
+    wait_parser.add_argument('--task-id', required=True)
+    wait_parser.add_argument('--timeout-seconds', type=float, default=45)
+    reply_parser = subs.add_parser('reply')
+    for flag in ('task-id', 'event-id', 'reply-id'):
+        reply_parser.add_argument('--' + flag, required=True)
+    reply_parser.add_argument('--reply-file', type=Path, required=True)
+    reply_parser.add_argument('--key', choices=('up', 'down', 'enter', *tuple('123456789')),
+                              help='One explicitly user-selected TUI key; observe again before the next key')
     for name in ('status', 'usage'):
         subs.add_parser(name).add_argument('--task-id', required=True)
     try:
         args = parser.parse_args(argv)
         store = Store(args.state_dir)
         if args.command == 'start':
-            result = start(store, args.task_id, args.repo, args.cli, args.prompt_file.read_text(), args.auto)
+            result = start(store, args.task_id, args.repo, args.cli, args.prompt_file.read_text(), args.auto, args.pr_mode)
+        elif args.command == 'active':
+            result = active(store)
+        elif args.command == 'wait':
+            result = wait(store, args.task_id, args.timeout_seconds)
+        elif args.command == 'reply':
+            result = reply(store, args.task_id, args.reply_file.read_text(), args.event_id, args.reply_id, args.key)
         elif args.command == 'status':
             result = status(store, args.task_id)
         elif args.command == 'usage':
