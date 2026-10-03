@@ -715,7 +715,9 @@ def observe(record):
     record['conversation'] = conversation
     record['pane_link'] = 'pane://open?' + urlencode(dict(pane=record['pane_id'], panel=record['panel_id']))
     latest = record.get('last_reply_id')
-    if latest and activity.get('activityStatus') == 'active':
+    if (latest and activity.get('activityStatus') == 'active' and not options and
+            record['replies'][latest].get('delivery') == 'sent' and
+            record['replies'][latest].get('action') == 'submit'):
         record['replies'][latest]['resume_evidence'] = dict(provenance='pane_panel_activity', observed_at=now(), **activity)
     record.pop('status_error', None)
 
@@ -805,6 +807,8 @@ def reply(store, task_id, reply_text, event_id, reply_id, key=None):
         navigation = key in ('up', 'down')
         delivery = dict(reply_id=reply_id, **request, delivery='unknown', intent_at=now(),
                         action='navigate' if navigation else 'submit', consumes_event=True,
+                        delivery_kind='text_submission' if key is None else 'raw_input',
+                        submission_verified=False,
                         pane_id=record['pane_id'], panel_id=record['panel_id'], resume_evidence=None)
         replies[reply_id] = delivery
         record['last_reply_id'] = reply_id
@@ -819,10 +823,23 @@ def reply(store, task_id, reply_text, event_id, reply_id, key=None):
             else:
                 payload = {'up': '\x1b[A', 'down': '\x1b[B', 'enter': '\r'}.get(key, key)
                 result = pane('panels', 'input', '--panel', record['panel_id'], '--text', payload, '--yes')
-            delivery.update(delivery='sent', sent_at=now(), consumes_event=not navigation,
-                            evidence=pick(result, ('delivery', 'verifiedSubmitted', 'verification', 'submitted')))
-            if navigation:
-                record['state'] = 'needs_attention'
+            delivery['evidence'] = pick(result, ('ok', 'delivery', 'verifiedSubmitted', 'verification', 'inputBytes'))
+            if key is None:
+                observed = result.get('delivery')
+                confirmed = (result.get('ok') is True and result.get('verifiedSubmitted') is True and
+                             result.get('verification') in (None, 'observed') and isinstance(observed, dict) and
+                             observed.get('state') in ('taken', 'queued') and
+                             observed.get('evidence') in ('transcript', 'screen', 'argv'))
+                delivery['submission_verified'] = confirmed
+            else:
+                # Raw input acknowledges bytes, never agent submission or resumption.
+                confirmed = result.get('ok') is True
+            if confirmed:
+                delivery.update(delivery='sent', sent_at=now(), consumes_event=not navigation)
+                if navigation:
+                    record['state'] = 'needs_attention'
+            else:
+                delivery['error'] = 'unverified_submission' if key is None else 'unacknowledged_input'
         except DispatchError as exc:
             delivery['error'] = str(exc)
         store.save(record)

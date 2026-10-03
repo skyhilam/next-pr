@@ -64,7 +64,8 @@ class FakePane:
             self.sends.append(args)
             if self.send_failure:
                 raise d.DispatchError(self.send_failure)
-            return dict(ok=True, verifiedSubmitted=True)
+            return dict(ok=True, verifiedSubmitted=True, verification='observed',
+                        delivery=dict(state='taken', evidence='transcript')) if cmd[1] == 'submit' else dict(ok=True)
         if args[0] == 'watch':
             return self.events
         if cmd == ('panes', 'cost'):

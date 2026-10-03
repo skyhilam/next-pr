@@ -176,6 +176,90 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(d.reply(self.store, 'task-1', 'go', event, 'crash')['delivery'], 'unknown')
         self.assertEqual(len(self.fake.sends), 1)
 
+    def test_text_reply_requires_affirmative_submission_evidence(self):
+        self.waiting()
+        taken = dict(ok=True, verifiedSubmitted=True, verification='observed',
+                     delivery=dict(state='taken', evidence='transcript'))
+        cases = [
+            ('unknown', dict(ok=True, verifiedSubmitted=False, verification='unverifiable',
+                             delivery=dict(state='unknown', evidence='screen')), False),
+            ('in-composer', dict(ok=True, verifiedSubmitted=False, verification='observed',
+                                 delivery=dict(state='in-composer', evidence='screen')), False),
+            ('missing', dict(ok=True), False),
+            ('flag-only', dict(ok=True, verifiedSubmitted=True), False),
+            ('state-only', dict(ok=True, delivery=dict(state='taken', evidence='screen')), False),
+            ('missing-provenance', dict(taken, delivery=dict(state='taken')), False),
+            ('unverified-taken', dict(taken, verifiedSubmitted=False), False),
+            ('contradictory-verification', dict(taken, verification='unverifiable'), False),
+            ('contradictory-state', dict(taken, delivery=dict(state='unknown', evidence='screen')), False),
+            ('taken', taken, True),
+            ('queued', dict(taken, delivery=dict(state='queued', evidence='screen')), True),
+            ('optional-verification-tag', {k: v for k, v in taken.items() if k != 'verification'}, True),
+        ]
+        for name, response, confirmed in cases:
+            with self.subTest(name=name):
+                self.fake.message = name + ': proceed?'
+                self.fake.activity = 'idle'
+                event = d.status(self.store, 'task-1')['conversation']['event_id']
+                original, sends_before = self.fake, len(self.fake.sends)
+                def call(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    return response if args[:2] == ('panels', 'submit') else result
+                with patch.object(d, 'pane', call):
+                    sent = d.reply(self.store, 'task-1', 'User reply', event, name)
+                    self.assertEqual(sent['delivery'], 'sent' if confirmed else 'unknown')
+                    self.assertEqual(sent['delivery_kind'], 'text_submission')
+                    self.assertEqual(sent['submission_verified'], confirmed)
+                    self.assertTrue(sent['consumes_event'])
+                    self.assertEqual(d.reply(self.store, 'task-1', 'User reply', event, name), sent)
+                    with self.assertRaisesRegex(d.DispatchError, 'stale'):
+                        d.reply(self.store, 'task-1', 'User reply', event, name + '-retry')
+                self.assertEqual(len(self.fake.sends), sends_before + 1)
+                if not confirmed:
+                    self.assertNotIn('sent_at', sent)
+                    self.fake.activity = 'active'
+                    record = d.status(self.store, 'task-1')
+                    self.assertEqual(record['replies'][name]['delivery'], 'unknown')
+                    self.assertIsNone(record['replies'][name]['resume_evidence'])
+
+    def test_raw_keys_acknowledge_bytes_without_claiming_agent_submission(self):
+        self.waiting()
+        self.fake.activity = 'active'
+        for key in ('up', 'down', 'enter', '1'):
+            with self.subTest(key=key):
+                self.fake.screen = f'Fixture {key}\n> 1. Blue\n  2. Green'
+                event = d.status(self.store, 'task-1')['conversation']['event_id']
+                original, sends_before = self.fake, len(self.fake.sends)
+                def call(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    return dict(ok=True) if args[:2] == ('panels', 'input') else result
+                with patch.object(d, 'pane', call):
+                    sent = d.reply(self.store, 'task-1', 'Fixture choice', event, key, key)
+                    self.assertEqual(sent['delivery'], 'sent')
+                    self.assertEqual(sent['delivery_kind'], 'raw_input')
+                    self.assertFalse(sent['submission_verified'])
+                    self.assertEqual(sent['consumes_event'], key not in ('up', 'down'))
+                    self.assertEqual(d.reply(self.store, 'task-1', 'Fixture choice', event, key, key), sent)
+                self.assertEqual(len(self.fake.sends), sends_before + 1)
+                self.assertIsNone(d.status(self.store, 'task-1')['replies'][key]['resume_evidence'])
+
+    def test_raw_input_without_ack_stays_unknown_and_consumed(self):
+        self.waiting()
+        self.fake.screen = '> 1. Blue\n  2. Green'
+        event = d.status(self.store, 'task-1')['conversation']['event_id']
+        original = self.fake
+        def call(*args, **kwargs):
+            result = original(*args, **kwargs)
+            return {} if args[:2] == ('panels', 'input') else result
+        with patch.object(d, 'pane', call):
+            sent = d.reply(self.store, 'task-1', 'Fixture choice', event, 'no-ack', 'up')
+            self.assertEqual(sent['delivery'], 'unknown')
+            self.assertTrue(sent['consumes_event'])
+            self.assertEqual(d.reply(self.store, 'task-1', 'Fixture choice', event, 'no-ack', 'up'), sent)
+            with self.assertRaisesRegex(d.DispatchError, 'stale'):
+                d.reply(self.store, 'task-1', 'Fixture choice', event, 'enter', 'enter')
+        self.assertEqual(len(self.fake.sends), 1)
+
     def test_report_question_not_resurrected_after_reply(self):
         self.waiting()
         self.fake.panels[0]['report'] = dict(state='blocked', question='Choose policy?', summary='Waiting')
@@ -524,7 +608,8 @@ class RelayConcurrencyTests(unittest.TestCase):
                     # its file. A different task lock allows the second full send.
                     d.reply(store, 'a', 'Second user instruction', 'second-panel', 'b:c')
                 delivered[panel] = path.read_text()
-                return dict(ok=True, verifiedSubmitted=True)
+                return dict(ok=True, verifiedSubmitted=True, verification='observed',
+                            delivery=dict(state='taken', evidence='transcript'))
             # Identity validation is covered separately; freeze both validated prompts
             # to isolate the cross-task file lifecycle under real Store locks.
             with patch.object(d, 'observe'), patch.object(d, 'pane', submit):

@@ -19,13 +19,12 @@ routine wake and that live menu recovery, not the still-pending new-dispatcher s
 The existing executable symlink points to
 `/Users/hotinlam/.local/share/pane-dispatch/source/bin/pane-dispatch`.
 After checking that this retained checkout is clean, fast-forward it to the reviewed fix.
-The install branch `fix/cli-conversation-relay-20261003` points to the same commit as draft
-PR #4’s existing head branch `fix/pane-conversation-relay`; the PR stays open for its reviewer:
+Use the actual draft PR #4 head branch, `fix/pane-conversation-relay`:
 
 ```sh
 git -C /Users/hotinlam/.local/share/pane-dispatch/source status --short
-git -C /Users/hotinlam/.local/share/pane-dispatch/source fetch origin fix/cli-conversation-relay-20261003
-git -C /Users/hotinlam/.local/share/pane-dispatch/source merge --ff-only origin/fix/cli-conversation-relay-20261003
+git -C /Users/hotinlam/.local/share/pane-dispatch/source fetch origin fix/pane-conversation-relay
+git -C /Users/hotinlam/.local/share/pane-dispatch/source merge --ff-only origin/fix/pane-conversation-relay
 cd /Users/hotinlam/.local/share/pane-dispatch/source
 python3 -m unittest discover -s tests -v
 bin/pane-dispatch --help
@@ -298,3 +297,28 @@ collapse to option labels alone. A pending pre-upgrade event must be refreshed w
 before replying; the newly observed event stays stable across the recorded blink phases.
 All earlier review fixes and unnumbered-menu tests remain included: **97 tests pass**.
 Parent will resume real smoke after installation and the user's permission choice.
+
+## Review follow-up: submission evidence versus raw byte delivery
+
+`panels submit` can return `ok:true` while delivery is unknown or still in the composer.
+A text reply now becomes `sent` only with `verifiedSubmitted:true`, `delivery.state`
+`taken`/`queued`, recognized evidence provenance, and no contradictory verification.
+The optional verification tag may be absent; when present it must be `observed`.
+Missing, unknown, in-composer or contradictory evidence leaves the durable intent
+`unknown` and consumed, without `sent_at`; duplicates return that record without resending.
+`delivery_kind:text_submission` and `submission_verified` make the distinction explicit.
+
+For constrained keys, `panels input` `ok:true` confirms byte delivery only:
+`delivery_kind:raw_input`, `delivery:sent`, `submission_verified:false`. Confirmed Up/Down
+still preserve the event; Enter/numeric keys consume it. Missing raw acknowledgement
+stays unknown/consumed, including navigation. Raw acknowledgement is not proof of agent
+submission or resumption. A still-visible menu or unknown delivery cannot supply
+`resume_evidence`; observe subsequent non-menu activity or reports before claiming resume.
+No unknown outcome is retried, even with a new reply ID.
+
+Regression cases cover unknown, in-composer, absent/incomplete/contradictory evidence,
+taken, queued, optional verification tags, raw acknowledgements for each key class,
+missing raw acknowledgement, duplicate no-resend and unknown remaining unknown after
+activity. Earlier review and real-menu regressions remain included. **100 tests pass**.
+The corrected parent install commands above use `fix/pane-conversation-relay`; no branch
+rename is needed. Parent retains live smoke continuation and permission decisions.

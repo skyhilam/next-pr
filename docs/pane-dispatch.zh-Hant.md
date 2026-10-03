@@ -208,8 +208,14 @@ reply 重新驗證身分及當前 prompt fingerprint，使用 `panels submit --i
 當前 CLI 無法驗證、普通 shell、過時 event、已消耗 event 都拒絕。
 先 fsync 保存 unknown intent，再做唯一一次 send。相同 reply-id + 完全相同請求回傳原 delivery；
 改內容／event／key 就拒絕。timeout、失敗、crash 的結果保持 unknown，絕不自動重送（包括換 ID）。
-`sent` 只代表 send 呼叫返回，不代表恢復工作；保留 Pane delivery/verifiedSubmitted 證據，
-只有後續觀察的 `resume_evidence` 能支持已恢復活動。模糊送達需人查看，不靠重送修復。
+文字 reply 只有 Pane 同時回 `verifiedSubmitted:true`、`delivery.state:taken|queued`、
+有效 evidence provenance，且 verification 沒有矛盾（省略或 observed），才標記 `sent`。
+`ok:true` 本身不夠；unknown、in-composer 或缺證據仍是 unknown／consumed，不自動重送。
+`delivery_kind:text_submission` 與 `submission_verified` 明確區分提交證據。
+受限按鍵的 raw input `ok:true` 只表示 byte delivery：`delivery_kind:raw_input`、
+`delivery:sent`、`submission_verified:false`；不等於 agent 已提交／恢復。保留 Pane 原始證據，
+仍見選單或 unknown delivery 時不產生 resume_evidence；要觀察之後非選單活動／report。
+模糊送達需人查看，不靠重送修復。
 
 TUI 使用 `--key up|down|enter|1..9`，每次只送一個受限按鍵，仍須 reply-file 記錄使用者原始選擇。
 只有當前 screen 有可辨認選單才接受 key，數字必須在該選單出現。無編號選單必須有
