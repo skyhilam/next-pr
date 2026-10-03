@@ -75,7 +75,7 @@ if [[ -z "$BASE" ]]; then
   [[ -n "$BASE" ]] || BASE="main"
 fi
 
-SHARED="$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
+SHARED="$(git worktree list --porcelain | sed -n 's/^worktree //p' | head -n 1)"
 if [[ -z "$SHARED" || ! -d "$SHARED" ]]; then
   echo "could not resolve shared checkout from git worktree list" >&2
   exit 1
@@ -91,31 +91,25 @@ PARENT="$(dirname "$SHARED")"
 WORKTREE="${PARENT}/next-pr-worktrees/${BRANCH//\//-}"
 mkdir -p "$(dirname "$WORKTREE")"
 
-git -C "$SHARED" fetch origin "$BASE"
+git -C "$SHARED" fetch origin "$BASE" >&2
 if [[ -e "$WORKTREE" ]]; then
   echo "worktree path already exists: $WORKTREE" >&2
   exit 1
 fi
 
-git -C "$SHARED" worktree add -b "$BRANCH" "$WORKTREE" "origin/${BASE}"
-git -C "$WORKTREE" commit --allow-empty -m "draft: ${TITLE}"
-git -C "$WORKTREE" push -u origin "$BRANCH"
+git -C "$SHARED" worktree add -b "$BRANCH" "$WORKTREE" "origin/${BASE}" >&2
+git -C "$WORKTREE" commit --allow-empty -m "draft: ${TITLE}" >&2
+git -C "$WORKTREE" push -u origin "$BRANCH" >&2
 
 PR_URL="$(gh pr create --repo "$REPO" --draft --base "$BASE" --head "$BRANCH" \
   --title "$TITLE" --body-file "$BODY_FILE")"
 PR_NUMBER="$(gh pr view "$PR_URL" --repo "$REPO" --json number -q .number)"
 HEAD_SHA="$(git -C "$WORKTREE" rev-parse HEAD)"
 
-python3 - <<PY
-import json
-print(json.dumps({
-  "repo": "$REPO",
-  "base": "$BASE",
-  "branch": "$BRANCH",
-  "worktree": "$WORKTREE",
-  "pr_number": int("$PR_NUMBER"),
-  "pr_url": "$PR_URL",
-  "head_sha": "$HEAD_SHA",
-  "shared_checkout": "$SHARED",
-}, ensure_ascii=False))
-PY
+python3 - "$REPO" "$BASE" "$BRANCH" "$WORKTREE" "$PR_NUMBER" "$PR_URL" "$HEAD_SHA" "$SHARED" <<'PYJSON'
+import json, sys
+keys = ("repo", "base", "branch", "worktree", "pr_number", "pr_url", "head_sha", "shared_checkout")
+result = dict(zip(keys, sys.argv[1:]))
+result["pr_number"] = int(result["pr_number"])
+print(json.dumps(result, ensure_ascii=False))
+PYJSON
