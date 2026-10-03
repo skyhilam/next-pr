@@ -405,6 +405,36 @@ def concurrent_reply(directory, event):
 
 
 class RelayConcurrencyTests(unittest.TestCase):
+    def test_colon_pairs_cannot_overwrite_another_tasks_reply_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = d.Store(directory)
+            for task, panel in [('a:b', 'first-panel'), ('a', 'second-panel')]:
+                store.save(dict(task_id=task, state='needs_attention', pane_id=panel + '-pane',
+                                panel_id=panel, conversation=dict(event_id=panel, replyable=True,
+                                options=[], report_key=None, content_signature=panel)))
+            delivered = {}
+            paths = {}
+            def submit(*args, **kwargs):
+                self.assertEqual(args[:2], ('panels', 'submit'))
+                panel = args[args.index('--panel') + 1]
+                path = Path(args[args.index('--input-file') + 1])
+                paths[panel] = path
+                if panel == 'first-panel':
+                    # Interleave while the first task lock is held, before Pane reads
+                    # its file. A different task lock allows the second full send.
+                    d.reply(store, 'a', 'Second user instruction', 'second-panel', 'b:c')
+                delivered[panel] = path.read_text()
+                return dict(ok=True, verifiedSubmitted=True)
+            # Identity validation is covered separately; freeze both validated prompts
+            # to isolate the cross-task file lifecycle under real Store locks.
+            with patch.object(d, 'observe'), patch.object(d, 'pane', submit):
+                first = d.reply(store, 'a:b', 'First user instruction', 'first-panel', 'c')
+                self.assertEqual(d.reply(store, 'a:b', 'First user instruction', 'first-panel', 'c'), first)
+            self.assertEqual(delivered, {'first-panel': 'First user instruction',
+                                         'second-panel': 'Second user instruction'})
+            self.assertNotEqual(paths['first-panel'], paths['second-panel'])
+            self.assertEqual(len(list(store.root.glob('*.reply'))), 2)
+
     def test_four_processes_deliver_same_reply_once(self):
         with tempfile.TemporaryDirectory() as directory:
             store = d.Store(directory)

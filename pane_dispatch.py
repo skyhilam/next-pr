@@ -751,7 +751,9 @@ def reply(store, task_id, reply_text, event_id, reply_id, key=None):
                 raise DispatchError('menu_key_not_present')
         elif key is not None:
             raise DispatchError('no_current_menu')
-        path = store.root / (digest(task_id + ':' + reply_id) + '.reply')
+        # Task locks are independent: delimiter-containing IDs must never share a
+        # payload file while another panel's submit is still reading it.
+        path = store.root / (digest(json.dumps([task_id, reply_id], ensure_ascii=False)) + '.reply')
         private_write(path, reply_text)
         navigation = key in ('up', 'down')
         delivery = dict(reply_id=reply_id, **request, delivery='unknown', intent_at=now(),

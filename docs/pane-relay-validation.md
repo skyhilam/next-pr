@@ -247,3 +247,13 @@ persistent blocked report. Tests cover rejection before send, first observation 
 active, fresh follow-up questions and replacement reports. Parent's ordinary-question
 smoke remains pending; this fix does not send input to the business panel. The full suite
 after this review fix passes **91 tests** (including 23 relay tests).
+
+## Review follow-up: cross-task reply payload isolation
+
+Reply-file names now hash the JSON tuple `[task_id, reply_id]`, rather than joining IDs
+with a colon. The regression interleaves `a:b` / `c` and `a` / `b:c` under independent
+real task locks: the second send completes before the first panel reads its payload.
+Before the fix, the first panel received the second user's text. With tuple hashing,
+both panels receive their own text from distinct files and duplicate delivery remains
+at most once. Existing delivery receipts still return before any file creation or send;
+unknown intents are not retried. The full suite now passes **92 tests**.
