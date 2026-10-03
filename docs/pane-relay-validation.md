@@ -4,10 +4,11 @@ This fix is stacked on **PR #3**, commit `ff3224dd2881eab4474ba8053cbe52f0b5fe26
 Its PR targets `feat/grok-pane-dispatch-20261003`. Neither PR is to be merged by the worker.
 The actual supervising owner is **總 · Eng in Grok Bot desktop**; the user routed work
 through Eng after initial setup. The parent owns installing the persistent checkout and
-updating both the main Bot and Eng’s supervision profile. Eng confirmed that native
-`Shell` background completion notifies and wakes the Bot after a turn ends, but stdout
-lines from a still-running process do not. `AwaitShell` only waits within a turn.
-`UpdateState` stores the supervising Bot state; no routine or daemon is needed.
+updating both the main Bot and Eng’s supervision profile. **The real test disproved the
+earlier claim that Shell completion reliably wakes the Bot.** CLI `wait` remains useful
+for bounded observation, but cannot provide cross-turn supervision by itself. Parent is
+configuring a native `UpdateState` routine; its actual ID, schedule and unattended tick
+verification are still pending. No native routine has been verified by this worker.
 
 ## Install and verify (parent)
 
@@ -24,44 +25,75 @@ python3 -m unittest discover -s tests -v
 bin/pane-dispatch --help
 # Shared snapshot: rearm only IDs owned by this Bot or explicitly handed off to it.
 bin/pane-dispatch active
-# Recover only owned task IDs; preserve Eng’s existing bounded-watch handle.
+# Preserve owner/handle state; native routine activation must be verified separately.
 ```
 
 Do not recreate or send a reply to the business task without its user's actual instruction.
 Use the supervision bootstrap in [the dispatcher guide](pane-dispatch.zh-Hant.md).
-`active` is a recovery snapshot; `wait_argv` alone is not monitoring. Use **native Shell
-background execution of bounded `pane-dispatch wait --task-id ID --timeout-seconds 45`**,
-not an endless `runpane watch --follow`. Store the returned shell handle per task with
-UpdateState. Both Bots share this dispatcher: filter `active` to IDs in that Bot’s own
-started-task/accepted-handoff ownership set before considering any rearm. Never adopt all
-active records or infer ownership from visibility. Unowned/ambiguous tasks remain inspection
-only. On handoff, the old owner removes the task from its recovery set and the new owner
-preserves/verifies the transferred handle, pending question and forwarded event IDs.
-Installing the contract in both profiles does not authorize a second waiter. Maintain
-exactly one active wait per task; on a matching completion callback,
-clear that handle once, inspect the result, and silently rearm only if the task is still
-active without a pending question. Ignore duplicate/stale callbacks. Do not spam timeout
-output. A question is forwarded once, bound to its event ID, and **stops background
-rearming until the user's reply**. After a successfully sent reply, arm again; unknown
-delivery/errors stop for inspection. Terminal/error events stop rearming; completion
-requires full result evidence and verification. AwaitShell is not a cross-turn callback.
-See the exact owner contract and result table in the dispatcher guide.
+`active` is a shared recovery snapshot, not a list of tasks every Bot may monitor. The
+native routine must filter it to this Bot’s started-task/explicitly accepted-handoff IDs.
+The routine also retains owned pending IDs in Bot state until their result is delivered: an
+ID disappearing from `active` is not proof of a delivered result. Read its status once to
+relay the final evidence, even if another observer already persisted `reported_ready`.
+On handoff, the old owner removes the task from its recovery set; the new owner preserves
+and verifies the existing Shell handle, pending question and notified fingerprints.
 
-A reply consumes its observed question fingerprint. The unchanged transcript remains
-visible as evidence with `consumed:true`, `new:false`, `replyable:false`; a busy transition
-does not make it a new message. `wait` stays blocked until new content, terminal/error
-evidence, or timeout. A panel exit must still wake it. Shell/notification receipts belong
-in UpdateState, a private `receipts/` subdirectory, or outside the dispatcher state root;
-never put them among the root `*.json` task records. Reply payloads remain `.reply` files
-and durable delivery intent stays inside the owning task record.
+## Cross-turn wake boundary: real evidence and pending activation
 
-The parent installs this instruction in both the main Bot and actual 總 · Eng owner. The
-parent alone will stop their exact obsolete `watch --follow` process after confirming its
-Shell handle and command; no broad process kill, routine, daemon, or unsupported callback
-API is part of this fix. The user has now answered **go ready** in Eng and the business
-Claude is running. Eng has a temporary bounded watch restoring supervision. Do not send
-that reply again, recreate the task, or duplicate its existing observer. Parent coordinates
-any transition to the installed dispatcher using the existing owner/handle state.
+Parent’s real test: background Shell handle **138984**, **18:48:28–18:49:14**, 46 seconds,
+exit 0, empty output. It did **not** wake Grok Bot/Eng after final. The next wake was the
+parent’s new message at **18:51**, not a background completion callback. This overrides
+the earlier Bot assertion and the previous version of these docs. Neither an endless
+`watch --follow` nor a terminating `pane-dispatch wait` establishes reliable cross-turn
+wake. `AwaitShell` waits only within the current turn. Do not report “monitoring restored”
+from a Shell handle, successful process exit, `wait_argv`, or a routine-creation claim.
+
+Parent is configuring **one existing native UpdateState routine for the owner**, with
+requested cadence **every minute**. No old runner, custom scheduler or Python daemon is
+introduced. The API names are `Shell`, `AwaitShell`, `UpdateState`; use the actual desktop
+schema, without invented callback/schedule arguments. Activation evidence is pending:
+
+| Required evidence | Status |
+| --- | --- |
+| Actual routine ID | Await parent receipt/readback. |
+| Stored schedule | Requested every minute; actual value awaits parent verification. |
+| Enabled state and owner/task scope | Await readback; only this Bot’s owned runnable tasks. |
+| Unattended tick after Bot final, without a new user message | Not yet verified. |
+| Idle disable / same-ID re-enable after start or reply | Await parent end-to-end verification. |
+
+The native routine contract is:
+
+1. Each minute, consider only owned tasks still needing observation. Skip waiting_user,
+   cancelled, terminal/error and unknown-delivery tasks awaiting inspection. Read `status`;
+   use bounded `wait` only as needed, without overlapping ticks or multiple waits per task.
+   Reconcile any existing Shell handle before another wait. Timeout output stays silent.
+2. Relay new prompt/options or result fingerprints once, with provenance and Pane link.
+   Dedup against **this owner’s** notified `task_id + event_id`/result fingerprint, not just
+   `conversation.new` (another status read can make it false without a user notification).
+   Consumed old transcripts are never new questions.
+3. On a question, save pending event and enter waiting_user. Subsequent routine ticks skip
+   that task: no duplicate prompt, no repeated permission request, no automatic answer.
+   Terminal/errors stop its automatic observation. Completion still needs report/test/PR/head
+   verification; routine execution is not task completion.
+4. If no owned runnable tasks remain, disable the same routine. A newly started task or a
+   successfully sent `action:submit` reply marks it runnable and re-enables **that same
+   verified routine ID**. Do not create routines per task, reply or timeout. Navigation keeps
+   menu pending until submission. Unknown delivery pauses for inspection, never retries.
+5. Preserve owned IDs, routine ID, existing handles, pending events and notified fingerprints
+   in Bot state. Keep receipts in UpdateState, a private `receipts/` subdirectory or outside
+   the dispatcher root; never create receipt JSON beside root `*.json` task records.
+
+Until the actual routine ID/schedule and unattended tick are verified, cross-turn relay is
+**pending integration verification**, not solved by the CLI alone. The detailed owner
+bootstrap and tick result table are in [the dispatcher guide](pane-dispatch.zh-Hant.md).
+Parent supplies the receipts and installs the contract in both main Bot and 總 · Eng. This
+worker does not configure the routine or change desktop state. Parent may stop only the
+exact obsolete watch process after confirming handle/command/owner; no broad process kill.
+
+The user’s **go ready** has already been delivered in Eng and business Claude is running.
+Do not resend it, recreate the task, or duplicate the observer. The temporary bounded watch
+is not proof of unattended supervision; parent coordinates its transition to the verified
+native routine.
 
 ## Reproduction evidence
 
@@ -92,19 +124,21 @@ This fix PR remains draft as requested.
 1. Use the parent's prepared private prompt unchanged; select a disposable saved repo and
    a unique task ID owned by Eng. Do not reuse the business task ID.
 2. `pane-dispatch start --task-id relay-acceptance-UNIQUE --repo REPO --cli claude --prompt-file /private/tmp/pane-relay-smoke-task.txt`
-3. Use native Shell background mode for `wait --task-id relay-acceptance-UNIQUE
-   --timeout-seconds 45` and store its returned handle. Let the Bot turn end. Verify its
-   completion callback wakes Eng. On timeout while active, clear the handle and silently
-   rearm exactly one wait. On the question, forward text/options, save `conversation.event_id`,
-   and verify **no waiter is rearmed while this question awaits the user**.
+3. First obtain and verify the existing native routine ID, stored every-minute schedule,
+   owner scope and enabled state. Start/re-enable that same routine for the owned smoke
+   task. Let Eng finish its turn; without sending any new message, verify a scheduled tick
+   actually wakes Eng, reads status/wait and forwards the red/blue question once. Save the
+   tick/delivery receipt outside root task JSON. The task then enters waiting_user; verify
+   subsequent ticks do not repeat it, and the routine disables if nothing else is runnable.
 4. Save the user's exact red/blue answer to a private reply file. Call `reply --task-id ...
    --reply-file ... --event-id ... --reply-id acceptance-reply-1`, then repeat that exact
    command once. The second call must return the existing delivery, without another send.
-5. After sent delivery, clear pending state and arm one new bounded background wait.
-   Verify the old question is not forwarded again while Claude works. Handle callbacks
-   until the chosen colour’s follow-up/result appears; stop on the next question or terminal
-   event. `sent` alone is not proof of resumption, and a read-only no-PR smoke result cannot
-   satisfy the dispatcher’s PR completion evidence contract.
+5. After sent submission, clear pending state and re-enable the **same routine ID**. Verify
+   the answered transcript is not forwarded again while Claude works. Let another unattended
+   tick relay the chosen colour’s follow-up/result; record the actual routine/tick receipts.
+   Stop on the next question or terminal event. `sent`, exit 0 or a scheduled routine alone
+   is not proof of resumption/success; a no-PR smoke result cannot satisfy the dispatcher’s
+   PR completion evidence contract.
 6. For a genuine TUI, bind the user's choice to the current event, use one `--key` at a time,
    and inspect the selected option before Enter. Never approve a real permission prompt
    merely because it appeared in terminal output.
@@ -162,7 +196,7 @@ bound dispatcher replies to that exact panel. Results:
 The inert-menu addition passed **83 tests**; the subsequent answered-transcript, terminal
 wakeup and receipt-isolation regressions bring the full suite to **86 passing tests**. The business task was not read or mutated
 for this menu test. The parent’s real ordinary-Claude question/reply test remains with Eng
-following installation, using the confirmed Shell completion contract above.
+following installation, using the native routine contract above; activation remains pending verification.
 
 ## Navigation boundary and lock deadline checks
 
@@ -172,7 +206,7 @@ event ID with a new reply ID. Duplicate navigation reply IDs still send at most 
 Enter, text, and numeric keys (which may submit directly) consume the event. Unknown
 navigation delivery retains its consuming intent, preventing an automatic retry or Enter.
 The parent keeps the pending menu through navigation, reads status, then continues the
-already-authorized selection; only submission rearms the background wait.
+already-authorized selection; only submission marks the task runnable and re-enables the same native routine.
 
 Regression tests cover unchanged Up-at-first followed by Enter, duplicate navigation and
 submission IDs, ambiguous navigation, real PTY boundary behavior, and a per-task flock held
