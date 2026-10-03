@@ -9,6 +9,14 @@ The coordinator is an explicit alternative to the skill's native subagent
 workflow. Do not run both on the same request or ask a worker to invoke the skill.
 It never installs or changes personal skills.
 
+**Draft safety limitation:** unattended use is not yet safe for arbitrary CLI
+descendants. A child can close inherited lock descriptors and leave its process
+group with `setsid()`, escaping the current completion check. The coordinator
+does not yet provide OS containment or exhaustive descendant accounting; normal
+exit and an empty process group do not prove all work has stopped. Keep this
+implementation in evaluation until that boundary is resolved. Offline fake-CLI
+tests also do not establish real CLI permission compatibility.
+
 ## Install and verify billing
 
 Requires macOS, Python **3.11+**, Git, authenticated `gh`, and a persistent checkout
@@ -167,9 +175,12 @@ auto-approve, weaken repository rules, or resolve missing product decisions.
 
 A runner acquires a single-use run lock, records its start, launches the CLI and
 writes an atomic completion receipt **after actual exit**. The run assignment is
-committed before spawn. Missing receipts, surviving descendants and ambiguous
-startup keep the task blocked and its concurrency slot reserved. Restarting the
-manager never blindly starts another writer. If the supervisor itself died,
+committed before spawn. Missing receipts, detected surviving process-group
+members and ambiguous startup keep the task blocked and its concurrency slot
+reserved. Inherited locks remain held until the last inherited descriptor closes,
+even when the supervisor exits normally; descriptors closed by descendants are
+not a containment boundary. A missing receipt never automatically starts another
+writer. If the supervisor itself died,
 manually inspect processes and logs, ensure **all** descendants have stopped,
 and checkpoint/commit/push any dirty worktree before resuming. Only after that:
 

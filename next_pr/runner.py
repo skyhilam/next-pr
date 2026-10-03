@@ -1,8 +1,9 @@
 """Detached supervisor: actual child exit produces an atomic durable receipt.
 
-Run locks are inherited by the CLI. Killing only this supervisor cannot authorize
-another writer. Cancellation is a request file handled by the owning supervisor,
-never a signal to a PID recovered from a database.
+Run locks are inherited by the CLI and retained while inherited descriptors remain
+open. This is not containment: descendants can close them and escape the group.
+Cancellation is a request file handled by the owning supervisor, never a signal
+to a PID recovered from a database.
 """
 import os
 from pathlib import Path
@@ -76,7 +77,8 @@ def run_child(manifest, directory, lock_fds):
                 elif now() - stop_at > 10:
                     os.killpg(child.pid, signal.SIGKILL)
             time.sleep(0.25)
-        # Detached/background children make handoff unsafe, even on exit code zero.
+        # Detect surviving group members. This cannot detect descendants that
+        # close inherited lock descriptors and escape with setsid(); see README.
         return dict(exit_code=child.returncode, cancelled=cancelled,
                     safe_to_retry=not group_alive(child.pid))
 

@@ -53,10 +53,10 @@ def lock(path, blocking=True):
             fcntl.flock(handle, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         except BlockingIOError:
             raise Blocked(f'lock held: {path.name}') from None
-        try:
-            yield handle
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+        # Close this descriptor on exit; do not explicitly unlock the shared open
+        # file description. Children may still hold inherited copies after this
+        # process exits, and their lock must remain until the last copy closes.
+        yield handle
 
 
 def lock_held(path):

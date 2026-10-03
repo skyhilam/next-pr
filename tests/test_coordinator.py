@@ -127,6 +127,29 @@ class LifecycleTests(Fixture):
         with self.assertRaisesRegex(Blocked, 'possibly live'):
             engine.resume_task(self.store, self.cfg, task, 'claude')
 
+    @patch('next_pr.github.reconciled_head', return_value=SHA)
+    @patch('next_pr.providers.gate')
+    def test_missing_receipt_recovery_preserves_resume_and_handoff_stage(self, _gate, _head):
+        for handoff in (None, 'claude'):
+            with self.subTest(handoff=handoff):
+                task = self.task(scope=str(handoff), key=str(handoff))
+                task['writer'] = 'codex'
+                record = self.record_run(task)
+                engine.consume(self.store, task, record)
+                task = self.store.task(task['id'])
+                self.assertEqual(task['resume_stage'], 'coding')
+                task = recover(self.store, task)
+                self.assertEqual(task['stage'], 'blocked')
+                self.assertEqual(task['resume_stage'], 'coding')
+                self.assertIsNone(task['run_id'])
+                self.assertTrue(self.store.runs(task['id'])[0]['consumed'])
+                engine.resume_task(self.store, self.cfg, task, handoff)
+                task = self.store.task(task['id'])
+                self.assertEqual(task['stage'], 'coding')
+                if handoff:
+                    self.assertEqual(task['writer'], handoff)
+                self.assertFalse(task['paused'])
+
     def test_live_lock_survives_manager_restart(self):
         task = self.task()
         record = self.record_run(task)
@@ -418,6 +441,59 @@ class RunnerTests(Fixture):
         atomic_json(path.parent / 'started.json', {'pid': 99999})
         with self.assertRaisesRegex(Blocked, 'already started'):
             runner.execute(path)
+
+    def test_setsid_descendant_retains_run_and_validation_locks(self):
+        ready, release = self.home / 'descendant-ready', self.home / 'release-descendant'
+        code = f'''import os, time
+from pathlib import Path
+ready, release = Path({str(ready)!r}), Path({str(release)!r})
+if os.fork() == 0:
+    os.setsid()
+    ready.write_text(str(os.getpid()))
+    while not release.exists():
+        time.sleep(0.02)
+    os._exit(0)
+while not ready.exists():
+    time.sleep(0.02)
+'''
+        path = self.manifest(code, role='validation')
+        try:
+            subprocess.run([sys.executable, '-m', 'next_pr.runner', str(path)],
+                           check=True, capture_output=True, timeout=5)
+            self.assertTrue(ready.exists())
+            child_pid = read_json(path.parent / 'child.json')['pid']
+            self.assertFalse(runner.group_alive(child_pid))
+            self.assertEqual(read_json(path.parent / 'receipt.json')['exit_code'], 0)
+            self.assertTrue(lock_held(path.parent / 'run.lock'))
+            self.assertTrue(lock_held(self.home / 'validation.lock'))
+            with self.assertRaisesRegex(Blocked, 'lock held'):
+                runner.execute(path)
+            # A second actual validation supervisor must wait despite the first
+            # supervisor having exited and its original process group being gone.
+            second = self.manifest('raise RuntimeError("must not launch")',
+                                   role='validation', directory='second')
+            process = subprocess.Popen([sys.executable, '-m', 'next_pr.runner', str(second)],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                deadline = time.time() + 5
+                while not (second.parent / 'started.json').exists() and time.time() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue((second.parent / 'started.json').exists())
+                atomic_json(second.parent / 'stop.json', {'cancel': True})
+                process.communicate(timeout=5)
+                self.assertFalse((second.parent / 'child.json').exists())
+                self.assertTrue(read_json(second.parent / 'receipt.json')['cancelled'])
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+        finally:
+            release.touch()
+            deadline = time.time() + 5
+            while lock_held(path.parent / 'run.lock') and time.time() < deadline:
+                time.sleep(0.02)
+        self.assertFalse(lock_held(path.parent / 'run.lock'))
+        self.assertFalse(lock_held(self.home / 'validation.lock'))
 
     def test_validation_serialization_and_supervisor_cancel(self):
         path = self.manifest('print("validation")', role='validation')

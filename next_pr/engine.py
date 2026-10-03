@@ -152,7 +152,8 @@ def consume(store, task, run):
             else:
                 raise Blocked('writer returned a reviewer-only outcome')
     except Blocked as error:
-        task['resume_stage'] = task['stage']
+        if task['stage'] != 'blocked':
+            task['resume_stage'] = task['stage']
         task.update(stage='blocked', note=str(error))
     with store.db:
         store.db.execute('UPDATE runs SET data=? WHERE id=?', (json.dumps(run), run['id']))
