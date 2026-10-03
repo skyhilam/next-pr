@@ -275,6 +275,51 @@ class RelayTests(unittest.TestCase):
         with self.assertRaisesRegex(d.DispatchError, 'invalid_menu_key'):
             d.reply(self.store, 'task-1', 'go', first['event_id'], 'bad', 'ctrl-c')
 
+    def test_unnumbered_trust_menu_requires_explicit_arrow_or_enter(self):
+        self.waiting()
+        self.fake.activity = 'active'
+        self.fake.screen = 'Trust this folder?\n ❯ No, exit\n   Yes, I trust this folder\n Enter to confirm · Esc to cancel'
+        before = d.wait(self.store, 'task-1', .1)['task']
+        self.assertEqual(before['state'], 'needs_attention')
+        menu = before['conversation']
+        self.assertTrue(menu['replyable'])
+        self.assertEqual(menu['options'], [dict(key=None, text='No, exit', selected=True),
+                                          dict(key=None, text='Yes, I trust this folder', selected=False)])
+        with self.assertRaisesRegex(d.DispatchError, 'menu_key_not_present'):
+            d.reply(self.store, 'task-1', 'Fixture choice', menu['event_id'], 'numeric', '1')
+        with self.assertRaisesRegex(d.DispatchError, 'menu_requires_explicit_key'):
+            d.reply(self.store, 'task-1', 'Fixture choice', menu['event_id'], 'text')
+        self.assertFalse(self.fake.sends)
+        nav = d.reply(self.store, 'task-1', 'Fixture choice', menu['event_id'], 'up', 'up')
+        self.assertEqual(d.reply(self.store, 'task-1', 'Fixture choice', menu['event_id'], 'up', 'up'), nav)
+        unchanged = d.status(self.store, 'task-1')['conversation']
+        self.assertEqual(unchanged['event_id'], menu['event_id'])
+        self.assertTrue(unchanged['replyable'])
+        d.reply(self.store, 'task-1', 'Fixture choice', menu['event_id'], 'down', 'down')
+        # Simulate the selection changing in response to the arrow byte.
+        self.fake.screen = 'Trust this folder?\n   No, exit\n ❯ Yes, I trust this folder\n Enter to confirm · Esc to cancel'
+        after = d.status(self.store, 'task-1')['conversation']
+        self.assertTrue(after['options'][1]['selected'])
+        self.assertNotEqual(after['event_id'], menu['event_id'])
+        with self.assertRaisesRegex(d.DispatchError, 'stale'):
+            d.reply(self.store, 'task-1', 'Fixture choice', menu['event_id'], 'stale-enter', 'enter')
+        d.reply(self.store, 'task-1', 'Fixture choice', after['event_id'], 'enter', 'enter')
+        self.assertEqual([args[args.index('--text') + 1] for args in self.fake.sends], ['\x1b[A', '\x1b[B', '\r'])
+
+    def test_unnumbered_menu_requires_aligned_choices_selector_and_footer(self):
+        menu = '❯ No, exit\n  Yes, I trust this folder\nEnter to confirm · Esc to cancel'
+        for invalid in ('No, exit\nYes, I trust this folder\nEnter to confirm',
+                        '❯ No, exit\n  Yes, I trust this folder',
+                        '❯ No, exit\nYes, I trust this folder\nEnter to confirm',
+                        '❯ No, exit\n❯ Yes, I trust this folder\nEnter to confirm',
+                        '❯ Only one option\nEnter to confirm',
+                        menu + '\nThis is an explanation of an old menu.'):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(d.menu_options(invalid), [])
+        # Earlier numbered prose must not supply invented numeric menu shortcuts.
+        parsed = d.menu_options('1. Earlier prose\n2. More prose\nTrust folder?\n' + menu)
+        self.assertEqual([option['key'] for option in parsed], [None, None])
+
     def test_boundary_navigation_keeps_same_event_available_for_enter(self):
         self.waiting()
         self.fake.screen = '> 1. Blue\n  2. Green'

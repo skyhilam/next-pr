@@ -551,6 +551,31 @@ def screen_text(text):
 
 def menu_options(text):
     # Conservative, explicit TUI signature. Prose numbered questions alone are not a menu.
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if lines and re.match(r'^\s*Enter to (?:confirm|select)\b', lines[-1], re.I):
+        # Unnumbered CLI choices require one selector and a contiguous, aligned
+        # choice block immediately before the confirmation footer. Do not invent
+        # numeric shortcuts, or borrow numbered prose elsewhere on the screen.
+        selected_rows = [(i, re.fullmatch(r'( *)[❯>›] (\S.*)', line))
+                         for i, line in enumerate(lines[:-1])]
+        for index, selected in reversed(selected_rows):
+            if not selected:
+                continue
+            indent = len(selected[1]) + 2
+            start, end = index, index + 1
+            choice = re.compile(r' {' + str(indent) + r'}(\S.*)')
+            while start > 0 and choice.fullmatch(lines[start - 1]):
+                start -= 1
+            while end < len(lines) - 1 and choice.fullmatch(lines[end]):
+                end += 1
+            if end != len(lines) - 1 or not 2 <= end - start <= 20:
+                return []
+            labels = [selected[2] if i == index else choice.fullmatch(lines[i])[1]
+                      for i in range(start, end)]
+            if any(len(label) > 240 or re.match(r'(?:[❯>›]|\d+[.)]\s)', label) for label in labels):
+                break  # Let explicit numbered menus use their printed shortcuts.
+            return [dict(key=None, text=label, selected=start + i == index)
+                    for i, label in enumerate(labels)]
     options = re.findall(r'^\s*[❯>›]?\s*([1-9])[.)]\s+(.+)$', text, re.M)
     selected = bool(re.search(r'^\s*[❯>›]\s*[1-9][.)]\s+', text, re.M))
     hint = bool(re.search(r'(?:↑|↓|arrow keys|enter to (?:select|confirm)|select an option)', text, re.I))

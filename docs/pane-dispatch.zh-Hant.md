@@ -212,7 +212,10 @@ reply 重新驗證身分及當前 prompt fingerprint，使用 `panels submit --i
 只有後續觀察的 `resume_evidence` 能支持已恢復活動。模糊送達需人查看，不靠重送修復。
 
 TUI 使用 `--key up|down|enter|1..9`，每次只送一個受限按鍵，仍須 reply-file 記錄使用者原始選擇。
-只有當前 screen 有可辨認選單才接受 key，數字必須在該選單出現。每次 key 後 status，
+只有當前 screen 有可辨認選單才接受 key，數字必須在該選單出現。無編號選單必須有
+單一 selector、連續對齊的選項與最後一行 Enter to confirm/select 提示；options 的 `key:null`、
+`selected` 只描述畫面，僅接受 up/down/enter，不虛構數字快捷鍵。即使 activity 為 active，
+目前明確選單仍回 needs_attention。每次 key 後 status，
 確認選取項目及當前 event_id，才送下一鍵。例如使用者已選 Ready，就 down、觀察 Ready 已選中、
 enter；不再問一次許可。已確認送出的 up/down 回傳 `action:navigate`、
 `consumes_event:false`；例如第一項再 up 令 screen/event 不變，仍可用相同 event_id、不同 reply_id

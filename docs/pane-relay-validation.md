@@ -257,3 +257,23 @@ Before the fix, the first panel received the second user's text. With tuple hash
 both panels receive their own text from distinct files and duplicate delivery remains
 at most once. Existing delivery receipts still return before any file creation or send;
 unknown intents are not retried. The full suite now passes **92 tests**.
+
+## Real smoke follow-up: unnumbered Claude menu
+
+Parent reported the trust prompt `❯ No, exit` / `  Yes, I trust this folder` with
+`Enter to confirm · Esc to cancel`, no numeric labels, and activity `active`. The
+regression reproduced `working`/no options before the fix. The parser now recognizes
+one selector and a contiguous aligned choice block immediately before an explicit
+Enter confirmation footer. It emits `key:null` and `selected` for these options,
+never invented numeric shortcuts. Current explicit menus return needs_attention even
+with active activity; numeric/text submissions are rejected, while user-bound arrow
+and Enter input use the existing identity, fingerprint and at-most-once checks.
+Malformed/one-option/unselected/stale-footer cases fail closed. Tests cover navigation,
+unchanged boundary Up, duplicate navigation, stale Enter and numeric rejection.
+
+This worker read the original smoke JSON and panel screen only. By that inspection,
+task `relay-color-20261003` in `/private/tmp/pane-relay-acceptance-state` had already
+advanced to a numbered outside-worktree read permission menu. No input or status-state
+write was sent to that task; the unnumbered regression uses the parent's reported text.
+User trust/permission decisions and real smoke continuation remain with parent.
+The complete suite now passes **94 tests**.
