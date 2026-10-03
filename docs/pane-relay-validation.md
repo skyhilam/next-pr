@@ -4,8 +4,10 @@ This fix is stacked on **PR #3**, commit `ff3224dd2881eab4474ba8053cbe52f0b5fe26
 Its PR targets `feat/grok-pane-dispatch-20261003`. Neither PR is to be merged by the worker.
 The actual supervising owner is **總 · Eng in Grok Bot desktop**; the user routed work
 through Eng after initial setup. The parent owns installing the persistent checkout and
-updating Eng’s supervision profile. Native background callback/reminder support is under
-parent investigation; no particular API or unattended capability is assumed yet.
+updating both the main Bot and Eng’s supervision profile. Eng confirmed that native
+`Shell` background completion notifies and wakes the Bot after a turn ends, but stdout
+lines from a still-running process do not. `AwaitShell` only waits within a turn.
+`UpdateState` stores the supervising Bot state; no routine or daemon is needed.
 
 ## Install and verify (parent)
 
@@ -27,9 +29,25 @@ bin/pane-dispatch wait --task-id tcg-staff-default-path-copy --timeout-seconds 4
 
 Do not recreate or send a reply to the business task without its user's actual instruction.
 Use the supervision bootstrap in [the dispatcher guide](pane-dispatch.zh-Hant.md).
-`active` is a recovery snapshot; `wait_argv` is not unattended monitoring. If the desktop has
-no native tool callback, the Bot must disclose when its observation loop stops and recover
-with `active` plus `status`/`wait` on its next turn.
+`active` is a recovery snapshot; `wait_argv` alone is not monitoring. Use **native Shell
+background execution of bounded `pane-dispatch wait --task-id ID --timeout-seconds 45`**,
+not an endless `runpane watch --follow`. Store the returned shell handle per task with
+UpdateState. Eng alone arms tasks it owns; installing the contract in the main Bot too
+does not authorize a second waiter. Preserve handles and pending state during ownership handoff. Maintain exactly one active wait per task; on a matching completion callback,
+clear that handle once, inspect the result, and silently rearm only if the task is still
+active without a pending question. Ignore duplicate/stale callbacks. Do not spam timeout
+output. A question is forwarded once, bound to its event ID, and **stops background
+rearming until the user's reply**. After a successfully sent reply, arm again; unknown
+delivery/errors stop for inspection. Terminal/error events stop rearming; completion
+requires full result evidence and verification. AwaitShell is not a cross-turn callback.
+See the exact owner contract and result table in the dispatcher guide.
+
+The parent installs this instruction in both the main Bot and actual 總 · Eng owner. The
+parent alone will stop their exact obsolete `watch --follow` process after confirming its
+Shell handle and command; no broad process kill, routine, daemon, or unsupported callback
+API is part of this fix. The existing business question has now surfaced through Eng and
+is awaiting the user's `go ready` / `go draft` / `cancel`. Preserve that pending state;
+do not rearm, recreate the task, or provide an answer on the user's behalf.
 
 ## Reproduction evidence
 
@@ -59,12 +77,17 @@ This fix PR remains draft as requested.
    identity protocol to report blocked with question 'Fixture finished; no PR was created.'
    Do not edit, commit, push, or open a PR.”
 2. `pane-dispatch start --task-id relay-acceptance-UNIQUE --repo REPO --cli claude --prompt-file PRIVATE_FILE`
-3. Immediately `wait --task-id relay-acceptance-UNIQUE --timeout-seconds 45`. Continue on
-   timeout; forward the actual question/options, retaining `conversation.event_id`.
+3. Use native Shell background mode for `wait --task-id relay-acceptance-UNIQUE
+   --timeout-seconds 45` and store its returned handle. Let the Bot turn end. Verify its
+   completion callback wakes Eng. On timeout while active, clear the handle and silently
+   rearm exactly one wait. On the question, forward text/options, save `conversation.event_id`,
+   and verify **no waiter is rearmed while this question awaits the user**.
 4. Save the user's exact label to a private reply file. Call `reply --task-id ...
    --reply-file ... --event-id ... --reply-id acceptance-reply-1`, then repeat that exact
    command once. The second call must return the existing delivery, without another send.
-5. Continue wait/status until the label and explicit blocked report appear. A send returning
+5. After sent delivery, clear pending state and arm one new bounded background wait.
+   Handle completion callbacks until the label and explicit blocked report appear, then
+   stop rearming and forward the report question once. A send returning
    `sent` alone is not proof of resumption, and this fixture must never report task success.
 6. For a genuine TUI, bind the user's choice to the current event, use one `--key` at a time,
    and inspect the selected option before Enter. Never approve a real permission prompt
@@ -122,4 +145,4 @@ bound dispatcher replies to that exact panel. Results:
 
 All **83 tests** passed after this addition. The business task was not read or mutated
 for this menu test. The parent’s real ordinary-Claude question/reply test remains with Eng
-following installation; native callback/reminder specifics will be documented when verified.
+following installation, using the confirmed Shell completion contract above.
