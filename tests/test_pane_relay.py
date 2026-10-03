@@ -312,3 +312,38 @@ class DeadlineTests(unittest.TestCase):
                 result = d.wait(store, 'slow', .1)
             self.assertEqual(result['outcome'], 'timeout')
             self.assertLess(time.monotonic() - started, 1)
+
+class InertMenuFixtureTests(unittest.TestCase):
+    def test_real_pty_arrow_numeric_and_enter_transitions(self):
+        import os
+        import pty
+        import select
+        import sys
+        master, slave = pty.openpty()
+        fixture = Path(__file__).parent / 'fixtures' / 'relay_menu.py'
+        process = subprocess.Popen([sys.executable, '-u', str(fixture)], stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        self.addCleanup(os.close, master)
+        def cleanup():
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=2)
+        self.addCleanup(cleanup)
+        def expect(text):
+            output = b''
+            deadline = time.monotonic() + 3
+            while text.encode() not in output and time.monotonic() < deadline:
+                if select.select([master], [], [], .1)[0]:
+                    try:
+                        output += os.read(master, 8192)
+                    except OSError:
+                        break
+            self.assertIn(text.encode(), output)
+        expect('Selected: Blue | Keys received: 0')
+        for key, text in [(b'\x1b[B', 'Selected: Green | Keys received: 1'),
+                          (b'\x1b[A', 'Selected: Blue | Keys received: 2'),
+                          (b'2', 'Selected: Green | Keys received: 3'),
+                          (b'\r', 'FIXTURE CONFIRMED: Green | Keys received: 4')]:
+            os.write(master, key)
+            expect(text)
+        self.assertEqual(process.wait(timeout=2), 0)

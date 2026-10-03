@@ -2,7 +2,10 @@
 
 This fix is stacked on **PR #3**, commit `ff3224dd2881eab4474ba8053cbe52f0b5fe264d`.
 Its PR targets `feat/grok-pane-dispatch-20261003`. Neither PR is to be merged by the worker.
-The parent owns installing the persistent checkout and updating the main Grok Bot profile.
+The actual supervising owner is **總 · Eng in Grok Bot desktop**; the user routed work
+through Eng after initial setup. The parent owns installing the persistent checkout and
+updating Eng’s supervision profile. Native background callback/reminder support is under
+parent investigation; no particular API or unattended capability is assumed yet.
 
 ## Install and verify (parent)
 
@@ -31,7 +34,8 @@ with `active` plus `status`/`wait` on its next turn.
 ## Reproduction evidence
 
 Read-only inspection on 2026-10-03 found the business task panel idle without a report.
-`panels last-message` returned Claude's “Your message contained only pasted text” reply,
+`panels last-message` returned the exact 925-character Claude “Your message contained
+only pasted text” reply, with no message timestamp in the supported schema,
 including “Proceed?”, “Draft or ready?”, and “Reply go”. The source explicitly requested
 non-draft while the old wrapper said DRAFT. The real Pane IDs are UUIDs without the
 literal `pane`/`panel` prefixes in the handoff:
@@ -44,7 +48,11 @@ another actor had resumed the task. It correctly returned `working`, a fresh tra
 progress message, `activity:active`, and `replyable:false`. This fix worker never sent
 input to that task or changed its original state/prompt.
 
-## Real CLI acceptance (parent, disposable task)
+## Real CLI acceptance (parent through 總 · Eng, disposable task)
+
+After installation, the parent runs this ordinary-question/reply check through Eng.
+The existing business source task’s explicit **ready PR** preference remains authoritative.
+This fix PR remains draft as requested.
 
 1. Write a private prompt for a disposable repo: “First ask me which label to print and
    wait. After my reply, print that exact label and use the validated explicit Pane/panel
@@ -85,3 +93,33 @@ and timed out waiting for resume evidence. It did **not** resend. This is not a 
 Claude end-to-end success claim; the parent acceptance steps above exercise that path
 with an actual disposable CLI session. Both fixtures are harmless and isolated from
 the business task; the second remains waiting with no further inputs sent.
+
+## Inert menu fixture
+
+`tests/fixtures/relay_menu.py` is a standalone Python TUI that only selects Blue/Green,
+counts received keys, and exits after confirmation or two minutes. It does not run
+commands, edit files, call APIs, make reports, or change any PR preference. Run it in a
+terminal with `python3 tests/fixtures/relay_menu.py`; the automated PTY test exercises
+actual Down/Up/numeric/Enter bytes:
+
+```sh
+python3 -m unittest discover -s tests -p test_pane_relay.py -v
+```
+
+A live Pane test used this script in isolated panel
+`2d71d5e4-cf0b-4073-ad6a-4470c9e0ad71` of the fix Pane, declared as Claude only to
+exercise Pane's CLI routing; no Claude process ran. Pane returned a readiness failure
+but its returned panel ID was retained, without creating a replacement. A private
+fixture record in `/var/folders/_2/vjprz7s55c30fclnyw7ry10r0000gn/T/pane-inert-menu-71vf00dy`
+bound dispatcher replies to that exact panel. Results:
+
+- `wait` returned the current menu and event ID.
+- `reply --key down` changed Blue to Green; the same reply ID returned its stored
+  delivery and left the count at one.
+- Enter with the old event ID was rejected.
+- Enter with the new event ID produced `FIXTURE CONFIRMED: Green | Keys received: 2`.
+- The fixture exited; no completion report or PR success was fabricated.
+
+All **83 tests** passed after this addition. The business task was not read or mutated
+for this menu test. The parent’s real ordinary-Claude question/reply test remains with Eng
+following installation; native callback/reminder specifics will be documented when verified.
