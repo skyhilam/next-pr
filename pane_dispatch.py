@@ -591,9 +591,17 @@ def observe(record):
     evidence = report_evidence(report, record['task_id']) if report else None
     record['evidence'] = evidence
     report_key = digest(json.dumps(report, sort_keys=True)) if report else None
+    # Reports persist even when a human resumes the panel outside this dispatcher.
+    # Active work contradicts a blocked report; retain it as evidence, never as a
+    # pending prompt. Remember this across idle transitions until the report changes.
+    if evidence and evidence['state'] == 'blocked' and activity.get('activityStatus') == 'active':
+        record['superseded_blocked_report'] = report_key
+    superseded = report_key is not None and record.get('superseded_blocked_report') == report_key
+    if superseded:
+        evidence.update(superseded=True, superseded_reason='observed_active_panel')
     # Persistent reports remain visible after reply, but must not resurrect a consumed question.
     consumed = record.get('consumed_report') == report_key and report_key is not None
-    if evidence and not consumed:
+    if evidence and not consumed and not superseded:
         state = report.get('state')
         record['state'] = ('reported_ready' if evidence['complete'] else 'incomplete_report') if state in ('ready', 'done') else (
             'reported_' + str(state) if state in ('failed', 'blocked') else 'incomplete_report')
@@ -613,7 +621,7 @@ def observe(record):
         source, excerpt = 'pane_agent_last_message', message['text'][-TEXT_LIMIT:]
         truncated = bool(message.get('truncated')) or len(message['text']) > TEXT_LIMIT
     question = None
-    if evidence and evidence.get('question') and not options and (not consumed or
+    if evidence and not superseded and evidence.get('question') and not options and (not consumed or
             content_signature == record.get('consumed_content_signature')):
         source, excerpt, question = 'pane_worker_report', evidence['question'][-TEXT_LIMIT:], evidence['question'][-TEXT_LIMIT:]
         truncated = len(evidence['question']) > TEXT_LIMIT
@@ -639,8 +647,7 @@ def observe(record):
     conversation['replyable'] = (bool(excerpt) and activity.get('isCliPanel') is True and
                                 not conversation['held_input'] and
                                 record['state'] not in ('reported_ready', 'reported_failed', 'incomplete_report') and
-                                (bool(options) or activity.get('activityStatus') == 'idle' or
-                                 (source == 'pane_worker_report' and record['state'] == 'reported_blocked')))
+                                (bool(options) or activity.get('activityStatus') == 'idle'))
     # Submission/unknown intents consume the event; confirmed navigation does not.
     conversation['consumed'] = (any(r['event_id'] == conversation['event_id'] and r.get('consumes_event', True)
                                    for r in record.get('replies', {}).values()) or

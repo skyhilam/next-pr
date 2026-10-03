@@ -232,3 +232,18 @@ A separate full-duration check held the task lock in another process and called
 `wait(..., timeout_seconds=45)`: it returned `timeout` in **45.0027 seconds** (including
 scheduling/return overhead), with the holder still alive and the lock still held. It did
 not wait for the holder to release the lock or make any Pane calls while contended.
+
+## Review follow-up: persistent blocked report after direct resume
+
+Review of `3558691` identified two blockers. The unchanged Up-at-first then Enter case was
+already fixed in `25e978e` and remains covered. A second regression reproduced a stale
+blocked report authorizing another reply after a human resumed the panel directly, without
+any dispatcher reply receipt. Active panel evidence now supersedes that blocked report;
+its question stays in `evidence` with `superseded:true` and reason `observed_active_panel`,
+but cannot override the current transcript or authorize input. The same report remains
+superseded after idle transitions; a replaced report can supply a new idle question.
+Replyability requires current idle evidence or a current explicit menu, never merely a
+persistent blocked report. Tests cover rejection before send, first observation already
+active, fresh follow-up questions and replacement reports. Parent's ordinary-question
+smoke remains pending; this fix does not send input to the business panel. The full suite
+after this review fix passes **91 tests** (including 23 relay tests).

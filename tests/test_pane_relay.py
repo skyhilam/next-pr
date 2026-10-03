@@ -191,6 +191,49 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(after['conversation']['excerpt'], self.fake.message)
         self.assertTrue(after['conversation']['replyable'])
 
+    def test_direct_resume_supersedes_persistent_blocked_report(self):
+        self.waiting()
+        self.fake.panels[0]['report'] = dict(state='blocked', question='Choose policy?', summary='Waiting')
+        blocked = d.status(self.store, 'task-1')
+        event = blocked['conversation']['event_id']
+        # A human resumes the panel directly: no dispatcher reply/consumption receipt.
+        self.fake.activity = 'active'
+        self.fake.message = 'Applying the selected policy and running tests.'
+        with self.assertRaisesRegex(d.DispatchError, 'stale'):
+            d.reply(self.store, 'task-1', 'Keep', event, 'late-reply')
+        working = d.status(self.store, 'task-1')
+        self.assertEqual(working['state'], 'working')
+        self.assertEqual(working['conversation']['excerpt'], self.fake.message)
+        self.assertIsNone(working['conversation']['question'])
+        self.assertFalse(working['conversation']['replyable'])
+        self.assertTrue(working['evidence']['superseded'])
+        self.assertEqual(working['evidence']['question'], 'Choose policy?')
+        self.assertFalse(self.fake.sends)
+        self.fake.activity = 'idle'
+        self.fake.message = 'Next question: red or blue?'
+        followup = d.wait(self.store, 'task-1', .1)['task']
+        self.assertEqual(followup['state'], 'needs_attention')
+        self.assertEqual(followup['conversation']['excerpt'], self.fake.message)
+        self.assertTrue(followup['conversation']['replyable'])
+        self.assertNotEqual(followup['conversation']['event_id'], event)
+        # A genuinely replaced report may supply a new question once idle.
+        self.fake.panels[0]['report'] = dict(state='blocked', question='New report question?', summary='Waiting')
+        fresh = d.status(self.store, 'task-1')
+        self.assertEqual(fresh['state'], 'reported_blocked')
+        self.assertEqual(fresh['conversation']['question'], 'New report question?')
+        self.assertTrue(fresh['conversation']['replyable'])
+
+    def test_first_observation_of_active_panel_cannot_authorize_old_report(self):
+        self.waiting()
+        self.fake.panels[0]['report'] = dict(state='blocked', question='Proceed?', summary='Old report')
+        self.fake.activity = 'active'
+        self.fake.message = 'Already running tests.'
+        working = d.wait(self.store, 'task-1', .1)['task']
+        self.assertEqual(working['state'], 'working')
+        self.assertEqual(working['conversation']['provenance'], 'pane_agent_last_message')
+        self.assertFalse(working['conversation']['replyable'])
+        self.assertIsNone(working['conversation']['question'])
+
     def test_menu_bytes_change_selection_before_confirmation(self):
         self.waiting()
         selected = 0

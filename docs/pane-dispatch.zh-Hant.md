@@ -110,7 +110,10 @@ runnable 指仍需觀察且不在 waiting_user、cancelled、terminal/error、un
 
 dedup 以本 owner 的已通知 `task_id + event_id`／result fingerprint 為準，不能只看
 `conversation.new`：它表示與前一次 status 觀察的差異，不代表該 owner 已經通知過使用者。
-`consumed:true` 的旧問題不是待轉發新問題。`last-message` 不可用但 screen fallback 正常不是
+`consumed:true` 的旧問題不是待轉發新問題。
+人直接在 panel 恢復工作時，active 證據會使舊 blocked report 標記 `superseded:true`；
+它保留在 evidence，但不再覆蓋目前 transcript、狀態或授權 reply，之後 idle 也不復活。
+只有換成新 report 才重新評估 report 問題；reply 必須有目前 idle 或明確選單證據。`last-message` 不可用但 screen fallback 正常不是
 terminal error。訊息／通知 receipts 存 UpdateState、私有 `receipts/` 子目錄或 dispatcher 外，
 不得放 root `*.json` task scan。
 
