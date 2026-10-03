@@ -56,6 +56,11 @@ pane-dispatch usage --task-id issue-42
 ```
 
 Repo 必須是 Pane 已儲存的 ID、完整路徑或唯一名稱；不接受會隨畫面改變的 `active`。
+新任務先向 `origin` 查詢遠端目前的預設分支，fetch 當時的精確 commit，再以該 SHA
+傳入 Pane `--base-branch`；不依賴可能過期的本機預設分支或 `origin/HEAD`。
+`base` 記錄保留 remote、ref、SHA 與 fetch 時間。查詢／fetch 失敗或沒有可確認的遠端
+預設分支，就在建立 worker 前停止；不偷偷改用舊 base。這不會 checkout、merge 或改動
+本機未提交內容。重送既有 task-id 保留原 base，不重新 fetch 或重開任務。
 程式以 `shutil.which` 及已知安裝目錄找到絕對 CLI 路徑，包括 `~/.local/bin/runpane`。
 Codex/Claude/Cursor 使用 Pane built-in agent identity；由於 Pane 2.4.152 預設模板帶有
 permission bypass flags，透過支援的 `--agent` + `--tool-command` 覆寫成安全的絕對 executable。
@@ -90,7 +95,10 @@ Worker 的 `runpane report --summary-file` 應包含 JSON（prompt envelope 已�
 Quota 由 [CodexBar CLI](https://raw.githubusercontent.com/steipete/CodexBar/main/docs/cli.md)
 的 `usage --provider PROVIDER --format json` 取得；保留 source、snapshot time、reset、fetch time、
 去識別 account key 與粗粒度 error。原始 stderr、帳號 email、credential/config 檔不輸出或讀取。
-本機 Grok Bot 與 Cursor 共用 Cursor quota group，只抓一次、不加總；OpenCode quota
+`grok` worker 是 xAI Grok CLI（`~/.grok/bin/grok`），使用 CodexBar `grok` provider，
+其 xAI 額度與 Cursor 分開；不要把 Cursor 內的 Grok Bot 桌面協調器誤當成此 CLI。
+詳見 [CodexBar Grok provider](https://raw.githubusercontent.com/steipete/CodexBar/main/docs/grok.md)。
+每個 provider 只抓一次，同一 provider 的重複帳戶快照去重，不加總成額外容量。OpenCode quota
 僅代表 CodexBar 的 opencode provider，不能證明 CLI 目前使用的 model/provider，因此 OpenCode 僅接受手動選擇。
 多帳號無法確認當前 CLI 帳戶時，不自動選擇。Auto 需要 10 分鐘內的單帳戶有效 quota，
 每個回傳 window 均未耗盡；quota 百分比只用作 eligibility，不跨 provider 當成同一預算排序。

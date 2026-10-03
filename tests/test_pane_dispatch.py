@@ -35,7 +35,7 @@ class FakePane:
             return {'daemon': {'reachable': True}}
         if args[0] == 'agent-context':
             return {'command': {'arguments': [{'name': n} for n in
-                    ('--agent', '--tool-command', '--initial-input-file', '--branch')]}}
+                    ('--agent', '--tool-command', '--initial-input-file', '--branch', '--base-branch')]}}
         if cmd == ('agents', 'doctor'):
             return {'available': True}
         if cmd == ('panes', 'list'):
@@ -65,6 +65,7 @@ class DispatchTests(unittest.TestCase):
         self.store = d.Store(Path(self.tmp.name) / 'private')
         self.fake = FakePane()
         for target, replacement in [('pane', self.fake),
+                ('fresh_base', lambda repo: dict(remote='origin', ref='refs/heads/main', sha=SHA)),
                 ('cli_info', lambda name: dict(cli=name, path='/safe bin/' + name, available=True)),
                 ('executable', lambda name: '/safe/' + name)]:
             mock = patch.object(d, target, replacement)
@@ -81,6 +82,20 @@ class DispatchTests(unittest.TestCase):
             with self.assertRaisesRegex(d.DispatchError, 'mismatch'):
                 self.start(prompt, cli)
         self.assertEqual(len(self.fake.creates), 1)
+
+    def test_pins_fetched_base_and_duplicate_never_refetches(self):
+        first = self.start()
+        args = self.fake.creates[0]
+        self.assertEqual(args[args.index('--base-branch') + 1], SHA)
+        with patch.object(d, 'fresh_base', side_effect=AssertionError('must not refetch')):
+            self.assertEqual(self.start()['base'], first['base'])
+
+    def test_fetch_failure_stops_before_intent_or_worker(self):
+        with patch.object(d, 'fresh_base', side_effect=d.DispatchError('process_exit_128')):
+            with self.assertRaisesRegex(d.DispatchError, 'process_exit_128'):
+                self.start()
+        self.assertIsNone(self.store.get('task-1'))
+        self.assertFalse(self.fake.creates)
 
     def test_timeout_and_process_failure_reconcile_never_relaunch(self):
         for failure in ('process_timeout', 'process_exit_1'):
@@ -288,7 +303,25 @@ class QuotaTests(unittest.TestCase):
         result = d.recommendation({'clis': entries})
         self.assertEqual(result['recommended_cli'], 'claude')
         self.assertTrue(result['selection_required'])
-        self.assertEqual(d.PROVIDERS['cursor'], d.PROVIDERS['grok'])
+        self.assertEqual(d.PROVIDERS['cursor'], 'cursor')
+        self.assertEqual(d.PROVIDERS['grok'], 'grok')
+
+    def test_grok_inventory_uses_xai_quota_not_cursor_capacity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def quota(provider):
+                return dict(provider=provider, usable=True, eligible=provider != 'grok')
+
+            with patch.object(d, 'pane', return_value={'repos': []}), \
+                    patch.object(d, 'cli_info', side_effect=lambda cli: dict(cli=cli, available=cli == 'grok',
+                                                                           quota_group=d.PROVIDERS[cli])), \
+                    patch.object(d, 'quota', side_effect=quota) as fetch:
+                snapshot = d.inventory(d.Store(directory))
+        self.assertEqual(fetch.call_count, len(set(d.PROVIDERS.values())))
+        self.assertEqual({call.args[0] for call in fetch.call_args_list}, set(d.PROVIDERS.values()))
+        grok = next(row for row in snapshot['clis'] if row['cli'] == 'grok')
+        self.assertEqual(grok['quota']['provider'], 'grok')
+        self.assertFalse(grok['quota']['eligible'])
+        self.assertIsNone(d.recommendation(snapshot, auto=True)['recommended_cli'])
 
 
 class ProcessTests(unittest.TestCase):
@@ -352,7 +385,8 @@ def concurrent_start(directory):
             time.sleep(0.1)
         return original(*args, **kwargs)
 
-    with patch.object(d, 'pane', pane), patch.object(d, 'cli_info', return_value={'available': True, 'path': '/codex'}):
+    with patch.object(d, 'pane', pane), patch.object(d, 'cli_info', return_value={'available': True, 'path': '/codex'}), \
+            patch.object(d, 'fresh_base', return_value=dict(remote='origin', ref='refs/heads/main', sha=SHA)):
         d.start(store, 'same-task', 'Repo', 'codex', 'Prompt')
 
 
@@ -367,6 +401,51 @@ class ConcurrencyTests(unittest.TestCase):
                 process.join(15)
                 self.assertEqual(process.exitcode, 0)
             self.assertEqual((Path(directory) / 'create-count').read_text(), 'create\n')
+
+
+class BaseTests(unittest.TestCase):
+    def test_fetches_remote_default_even_when_local_default_is_stale_or_renamed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote, seed, checkout = (root / name for name in ('remote.git', 'seed', 'checkout'))
+
+            def git(path, *args):
+                return subprocess.check_output(['git', '-C', str(path), *args], stderr=subprocess.PIPE, text=True).strip()
+
+            git(root, 'init', '--bare', str(remote))
+            git(remote, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+            git(root, 'init', '-b', 'main', str(seed))
+            git(seed, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-m', 'initial')
+            git(seed, 'remote', 'add', 'origin', str(remote))
+            git(seed, 'push', 'origin', 'main')
+            git(root, 'clone', str(remote), str(checkout))
+            original = git(checkout, 'rev-parse', 'HEAD')
+            (checkout / 'local.txt').write_text('keep this uncommitted file')
+            git(seed, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-m', 'new upstream')
+            git(seed, 'push', 'origin', 'main')
+            new_head = git(seed, 'rev-parse', 'HEAD')
+            self.assertNotEqual(original, new_head)
+            result = d.fresh_base(str(checkout))
+            self.assertEqual(result['sha'], new_head)
+            self.assertEqual(result['ref'], 'refs/heads/main')
+
+            git(seed, 'switch', '-c', 'trunk')
+            git(seed, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-m', 'new default')
+            git(seed, 'push', 'origin', 'trunk')
+            git(remote, 'symbolic-ref', 'HEAD', 'refs/heads/trunk')
+            result = d.fresh_base(str(checkout))
+            self.assertEqual(result['sha'], git(seed, 'rev-parse', 'HEAD'))
+            self.assertEqual(result['ref'], 'refs/heads/trunk')
+            self.assertEqual(git(checkout, 'rev-parse', 'HEAD'), original)
+            self.assertEqual(git(checkout, 'symbolic-ref', 'refs/remotes/origin/HEAD'), 'refs/remotes/origin/main')
+            self.assertEqual((checkout / 'local.txt').read_text(), 'keep this uncommitted file')
+            self.assertEqual(git(checkout, 'cat-file', '-t', result['sha']), 'commit')
+
+    def test_unknown_remote_default_has_no_local_fallback(self):
+        with patch.object(d, 'run', return_value=SHA + '\tHEAD\n') as run:
+            with self.assertRaisesRegex(d.DispatchError, 'remote_default_unavailable'):
+                d.fresh_base('/repo')
+        self.assertEqual(run.call_count, 1)
 
 
 if __name__ == '__main__':
