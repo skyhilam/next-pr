@@ -196,6 +196,22 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(result['state'], 'reported_failed')
         self.assertEqual(result['watch_error'], 'watch_unavailable')
 
+    def test_blocked_question_and_human_summary_survive_status_and_storage(self):
+        self.start()
+        question = 'Should the migration preserve the old column?\n請確認保留期限。'
+        human_summary = 'Implementation is paused until the migration policy is confirmed.'
+        for summary in (human_summary, json.dumps(dict(summary=human_summary,
+                                                      internal_details='do-not-forward'))):
+            with self.subTest(summary=summary):
+                self.fake.panels[0]['report'] = dict(state='blocked', question=question, summary=summary)
+                result = d.status(self.store, 'task-1')
+                self.assertEqual(result['state'], 'reported_blocked')
+                self.assertFalse(result['evidence']['complete'])
+                self.assertEqual(result['evidence']['question'], question)
+                self.assertEqual(result['evidence']['summary'], human_summary)
+                self.assertEqual(self.store.get('task-1')['evidence'], result['evidence'])
+                self.assertNotIn('do-not-forward', json.dumps(result))
+
     def test_journal_cursor_progresses_without_losing_previous_events(self):
         self.start()
         self.fake.events = [dict(gen=42, paneId='pane-1', panelId='panel-1', kind='agent.idle')]
@@ -208,11 +224,13 @@ class DispatchTests(unittest.TestCase):
     def test_result_evidence_and_session_pr_are_durable(self):
         self.start()
         summary = dict(task_id='task-1', head=SHA, pr_url='https://github.com/o/r/pull/9',
-                       cli_session_id='cli-session', tests=[dict(command='python -m unittest', outcome='passed')])
+                       cli_session_id='cli-session', tests=[dict(command='python -m unittest', outcome='passed')],
+                       summary='Implemented and tested the requested change.')
         self.fake.panels[0]['report'] = dict(state='ready', head=SHA, pr=9, summary=json.dumps(summary))
         result = d.status(self.store, 'task-1')
         self.assertEqual(result['state'], 'reported_ready')
         self.assertFalse(result['evidence']['independently_verified'])
+        self.assertEqual(result['evidence']['summary'], summary['summary'])
         self.assertEqual(self.store.get('task-1')['cli_session_id'], 'cli-session')
         self.assertEqual(result['pr']['head'], SHA)
         summary['tests'][0]['outcome'] = 'failed'

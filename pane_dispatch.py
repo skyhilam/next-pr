@@ -399,11 +399,17 @@ def start(store, task_id, repo, cli, prompt, auto=False):
 
 
 def report_evidence(report, task_id):
+    raw_summary = report.get('summary')
     result = dict(provenance='pane_worker_report', independently_verified=False,
                   reported_at=report.get('reportedAt'), state=report.get('state'),
-                  head=report.get('head'), pr=report.get('pr'), complete=False)
+                  head=report.get('head'), pr=report.get('pr'), complete=False,
+                  question=report.get('question') if isinstance(report.get('question'), str) else None,
+                  summary=raw_summary if isinstance(raw_summary, str) else None)
     try:
-        summary = json.loads(report.get('summary', ''))
+        summary = json.loads(raw_summary or '')
+        # Expose only the human summary from a structured report, not arbitrary fields.
+        result['summary'] = (summary.get('summary') if isinstance(summary, dict) and
+                             isinstance(summary.get('summary'), str) else None)
         tests = summary.get('tests')
         valid = (type(report.get('pr')) is int and report['pr'] > 0 and
                  summary.get('task_id') == task_id and re.fullmatch('[0-9a-f]{40}', summary.get('head', ''))

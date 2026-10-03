@@ -77,6 +77,8 @@ dispatcher 沒有背景程序。idle、ready UI、exit 0 都不是完成。
 `reported_ready` 表示具完整證據的 **worker 自述**，`independently_verified:false`；
 不是 CI 或 code review 保證。主 Bot 應檢查 GitHub 的 PR head 與測試結果，head 改變須重新 review。
 `incomplete_report`／`needs_inspection`／`status_error` 不得呈現為成功。
+`reported_blocked` 的 `evidence.question` 保留使用者須回答的問題，`evidence.summary`
+保留 worker 的文字摘要；JSON report 只取其中的 `summary` 文字，不轉發任意額外欄位。
 
 Worker 的 `runpane report --summary-file` 應包含 JSON（prompt envelope 已要求）：
 
