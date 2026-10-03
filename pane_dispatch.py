@@ -600,6 +600,12 @@ def menu_context(text):
     return text
 
 
+def output_line_signatures(text):
+    # Ignore selection/progress marker blinking, whitespace and border-only lines.
+    lines = [re.sub(r'^\s*[⏺❯>›]\s*', '', line).strip() for line in text.splitlines()]
+    return sorted({digest(line) for line in lines if any(char.isalnum() for char in line)})
+
+
 def observe(record):
     panel = panel_identity(record)
     try:
@@ -631,6 +637,10 @@ def observe(record):
     options = menu_options(context)
     message = reads.get('last-message', {})
     content_signature = digest(message.get('text', '') if message.get('text') and not options else context)
+    observation = dict(activity=activity.get('activityStatus'), content_signature=content_signature,
+                       message_signature=digest(message.get('text', '')) if 'last-message' in reads else None,
+                       screen_lines=output_line_signatures(text) if 'screen' in reads else None)
+    record['output_observation'] = observation
     report = panel.get('report')
     evidence = report_evidence(report, record['task_id']) if report else None
     record['evidence'] = evidence
@@ -715,10 +725,27 @@ def observe(record):
     record['conversation'] = conversation
     record['pane_link'] = 'pane://open?' + urlencode(dict(pane=record['pane_id'], panel=record['panel_id']))
     latest = record.get('last_reply_id')
-    if (latest and activity.get('activityStatus') == 'active' and not options and
-            record['replies'][latest].get('delivery') == 'sent' and
-            record['replies'][latest].get('action') == 'submit'):
-        record['replies'][latest]['resume_evidence'] = dict(provenance='pane_panel_activity', observed_at=now(), **activity)
+    if latest:
+        receipt = record['replies'][latest]
+        before = receipt.get('before_send') or {}
+        if not before or receipt.get('action') != 'submit' or receipt.get('delivery') != 'sent':
+            receipt['resume_evidence'] = None  # Discard unsupported legacy claims too.
+        transitioned = receipt.get('last_observed_activity', before.get('activity')) == 'idle'
+        new_message = (bool(message.get('text')) and before.get('message_signature') is not None and
+                       observation['message_signature'] != before['message_signature'])
+        new_lines = (before.get('screen_lines') is not None and
+                     bool(set(observation['screen_lines'] or []) - set(before['screen_lines'])))
+        if (before and receipt.get('delivery') == 'sent' and receipt.get('action') == 'submit' and
+                activity.get('activityStatus') == 'active' and activity.get('isCliPanel') is True and
+                not options and not conversation['held_input'] and not record.get('terminal_event') and
+                (transitioned or new_message or new_lines) and not receipt.get('resume_evidence')):
+            receipt['resume_evidence'] = dict(
+                provenance='pane_panel_activity' if transitioned else (
+                    'pane_agent_last_message' if new_message else 'pane_terminal_screen'),
+                reason='idle_to_active' if transitioned else 'new_output', observed_at=now(),
+                before_content_signature=before.get('content_signature'),
+                content_signature=content_signature, **activity)
+        receipt['last_observed_activity'] = activity.get('activityStatus')
     record.pop('status_error', None)
 
 
@@ -809,7 +836,12 @@ def reply(store, task_id, reply_text, event_id, reply_id, key=None):
                         action='navigate' if navigation else 'submit', consumes_event=True,
                         delivery_kind='text_submission' if key is None else 'raw_input',
                         submission_verified=False,
+                        before_send=dict(record.get('output_observation') or {}),
                         pane_id=record['pane_id'], panel_id=record['panel_id'], resume_evidence=None)
+        if delivery['before_send'].get('screen_lines') is not None:
+            # A terminal echo of the user's reply is not new agent output.
+            delivery['before_send']['screen_lines'] = sorted(set(
+                delivery['before_send']['screen_lines'] + output_line_signatures(reply_text)))
         replies[reply_id] = delivery
         record['last_reply_id'] = reply_id
         if not navigation:

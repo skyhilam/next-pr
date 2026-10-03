@@ -260,6 +260,70 @@ class RelayTests(unittest.TestCase):
                 d.reply(self.store, 'task-1', 'Fixture choice', event, 'enter', 'enter')
         self.assertEqual(len(self.fake.sends), 1)
 
+    def test_active_menu_up_enter_requires_new_output_before_resume(self):
+        self.waiting()
+        self.fake.activity = 'active'
+        self.fake.message = 'Earlier agent message.'
+        self.fake.screen = '⏺ Reading fixture\nConfirm fixture?\n> 1. Blue\n  2. Green'
+        event = d.status(self.store, 'task-1')['conversation']['event_id']
+        d.reply(self.store, 'task-1', 'Fixture Blue', event, 'up', 'up')
+        self.assertIsNone(d.status(self.store, 'task-1')['replies']['up']['resume_evidence'])
+        sent = d.reply(self.store, 'task-1', 'Fixture Blue', event, 'enter', 'enter')
+        self.assertIsNone(d.status(self.store, 'task-1')['replies']['enter']['resume_evidence'])
+        # Menu disappearance or a blink alone is not new agent output.
+        self.fake.screen = '  Reading fixture'
+        self.assertIsNone(d.status(self.store, 'task-1')['replies']['enter']['resume_evidence'])
+        self.assertEqual(sent['before_send']['activity'], 'active')
+        self.assertTrue(sent['before_send']['content_signature'])
+        self.fake.screen = '⏺ Reading fixture'
+        self.assertIsNone(d.status(self.store, 'task-1')['replies']['enter']['resume_evidence'])
+        self.fake.screen += '\n❯ Fixture Blue'
+        self.assertIsNone(d.status(self.store, 'task-1')['replies']['enter']['resume_evidence'])
+        self.fake.screen += '\nRunning fixture tests now.'
+        resumed = d.status(self.store, 'task-1')['replies']['enter']['resume_evidence']
+        self.assertEqual(resumed['reason'], 'new_output')
+        self.assertEqual(resumed['provenance'], 'pane_terminal_screen')
+        self.assertIsNone(self.store.get('task-1')['replies']['up']['resume_evidence'])
+
+    def test_navigation_never_establishes_resume_even_after_selection_and_output_change(self):
+        self.waiting()
+        self.fake.activity = 'active'
+        self.fake.screen = '> 1. Blue\n  2. Green'
+        event = d.status(self.store, 'task-1')['conversation']['event_id']
+        d.reply(self.store, 'task-1', 'Fixture Green', event, 'down', 'down')
+        self.fake.screen = '  1. Blue\n> 2. Green'
+        self.assertIsNone(d.status(self.store, 'task-1')['replies']['down']['resume_evidence'])
+        self.fake.screen = 'Running fixture tests.'
+        self.fake.message = 'New agent output.'
+        self.assertIsNone(d.status(self.store, 'task-1')['replies']['down']['resume_evidence'])
+
+    def test_confirmation_new_agent_message_establishes_resume_only_after_menu_gone(self):
+        self.waiting()
+        self.fake.activity = 'active'
+        self.fake.screen = '> 1. Blue\n  2. Green'
+        event = d.status(self.store, 'task-1')['conversation']['event_id']
+        d.reply(self.store, 'task-1', 'Fixture Blue', event, 'enter', 'enter')
+        self.fake.message = 'Applying the fixture selection.'
+        self.assertIsNone(d.status(self.store, 'task-1')['replies']['enter']['resume_evidence'])
+        self.fake.screen = ''
+        resumed = d.status(self.store, 'task-1')['replies']['enter']['resume_evidence']
+        self.assertEqual(resumed['reason'], 'new_output')
+        self.assertEqual(resumed['provenance'], 'pane_agent_last_message')
+
+    def test_ordinary_idle_to_active_reply_records_transition_evidence(self):
+        event = self.waiting()
+        sent = d.reply(self.store, 'task-1', 'Fixture instruction', event, 'text')
+        self.assertEqual(sent['before_send']['activity'], 'idle')
+        self.assertIsNone(d.status(self.store, 'task-1')['replies']['text']['resume_evidence'])
+        self.fake.activity = 'active'
+        resumed = d.status(self.store, 'task-1')['replies']['text']['resume_evidence']
+        self.assertEqual(resumed['reason'], 'idle_to_active')
+        self.assertEqual(resumed['provenance'], 'pane_panel_activity')
+        legacy = self.store.get('task-1')
+        legacy['replies']['text'].pop('before_send')
+        self.store.save(legacy)
+        self.assertIsNone(d.status(self.store, 'task-1')['replies']['text']['resume_evidence'])
+
     def test_report_question_not_resurrected_after_reply(self):
         self.waiting()
         self.fake.panels[0]['report'] = dict(state='blocked', question='Choose policy?', summary='Waiting')

@@ -214,7 +214,10 @@ reply 重新驗證身分及當前 prompt fingerprint，使用 `panels submit --i
 `delivery_kind:text_submission` 與 `submission_verified` 明確區分提交證據。
 受限按鍵的 raw input `ok:true` 只表示 byte delivery：`delivery_kind:raw_input`、
 `delivery:sent`、`submission_verified:false`；不等於 agent 已提交／恢復。保留 Pane 原始證據，
-仍見選單或 unknown delivery 時不產生 resume_evidence；要觀察之後非選單活動／report。
+每次 intent 先持久保存 `before_send` 活動與內容基準。只有已確認送達的 submission，
+在選單／held input 已消失、CLI active 時，才以 idle→active 轉換或相對基準的新 agent／screen
+輸出建立 `resume_evidence`，並記錄 reason/provenance。導航永不代表恢復；仍見選單、unknown、
+單純選單消失、progress marker 閃爍或使用者回覆 echo 都不是 resumption 證據。
 模糊送達需人查看，不靠重送修復。
 
 TUI 使用 `--key up|down|enter|1..9`，每次只送一個受限按鍵，仍須 reply-file 記錄使用者原始選擇。

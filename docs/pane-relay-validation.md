@@ -322,3 +322,24 @@ missing raw acknowledgement, duplicate no-resend and unknown remaining unknown a
 activity. Earlier review and real-menu regressions remain included. **100 tests pass**.
 The corrected parent install commands above use `fix/pane-conversation-relay`; no branch
 rename is needed. Parent retains live smoke continuation and permission decisions.
+
+## Review follow-up: resumption requires a pre-send baseline
+
+Every new reply intent now persists `before_send` activity and content evidence before
+sending. Screen evidence uses normalized line hashes, retaining content while ignoring
+selection/progress marker blinking, blank space and border-only rows. The user's reply
+text is included in the baseline so its terminal echo cannot count as new agent output.
+An unavailable pre-send read cannot supply evidence of later changed output.
+
+Only a confirmed delivery with `action:submit` can acquire `resume_evidence`. The current
+panel must be active, still a CLI, have no recognized menu/held composer input or terminal
+exit evidence, and show either an observed idle-to-active transition or meaningful new
+agent-message/screen output relative to the saved baseline. Evidence records the reason
+and provenance. Navigation never qualifies, even after changed selection or new output;
+unknown delivery and old receipts without a baseline fail closed. An unchanged active
+menu, menu disappearance alone, blink, or reply echo cannot establish resumption.
+
+Regressions cover Up and Enter against an unchanged active menu, changed-selection
+navigation, confirmation followed by new screen/agent output, and ordinary idle-to-active
+submission. All queued fixes remain combined on `fix/pane-conversation-relay`; the full
+suite now passes **104 tests**. This worker sends no inputs to the live acceptance task.
