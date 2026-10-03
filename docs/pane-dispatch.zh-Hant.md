@@ -56,11 +56,6 @@ pane-dispatch usage --task-id issue-42
 ```
 
 Repo 必須是 Pane 已儲存的 ID、完整路徑或唯一名稱；不接受會隨畫面改變的 `active`。
-新任務先向 `origin` 查詢遠端目前的預設分支，fetch 當時的精確 commit，再以該 SHA
-傳入 Pane `--base-branch`；不依賴可能過期的本機預設分支或 `origin/HEAD`。
-`base` 記錄保留 remote、ref、SHA 與 fetch 時間。查詢／fetch 失敗或沒有可確認的遠端
-預設分支，就在建立 worker 前停止；不偷偷改用舊 base。這不會 checkout、merge 或改動
-本機未提交內容。重送既有 task-id 保留原 base，不重新 fetch 或重開任務。
 程式以 `shutil.which` 及已知安裝目錄找到絕對 CLI 路徑，包括 `~/.local/bin/runpane`。
 Codex/Claude/Cursor 使用 Pane built-in agent identity；由於 Pane 2.4.152 預設模板帶有
 permission bypass flags，透過支援的 `--agent` + `--tool-command` 覆寫成安全的絕對 executable。

@@ -56,11 +56,11 @@ def executable(name):
     return None
 
 
-def run(argv, timeout=25, ndjson=False, with_exit=False, raw=False, env=None):
+def run(argv, timeout=25, ndjson=False, with_exit=False):
     """Never expose raw stdout/stderr on errors (they may contain credentials)."""
     try:
         proc = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
-                              text=True, timeout=timeout, shell=False, env=env)
+                              text=True, timeout=timeout, shell=False)
     except subprocess.TimeoutExpired:
         raise DispatchError('process_timeout') from None
     except OSError:
@@ -68,8 +68,7 @@ def run(argv, timeout=25, ndjson=False, with_exit=False, raw=False, env=None):
     if proc.returncode and not with_exit:
         raise DispatchError('process_exit_' + str(proc.returncode))
     try:
-        value = proc.stdout if raw else ([json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
-                                       if ndjson else json.loads(proc.stdout))
+        value = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()] if ndjson else json.loads(proc.stdout)
         return (value, proc.returncode) if with_exit else value
     except (ValueError, TypeError):
         raise DispatchError('invalid_json') from None
@@ -87,29 +86,6 @@ def pane(*args, timeout=25, ndjson=False):
 
 def pick(value, keys):
     return {key: value[key] for key in keys if key in value}
-
-
-def fresh_base(repo):
-    """Fetch the remote's advertised default commit without changing the checkout."""
-    git = executable('git')
-    if not git:
-        raise DispatchError('git_missing')
-
-    def call(*args):
-        return run([git, '-C', repo, *args], timeout=30, raw=True,
-                   env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
-
-    advertised = call('ls-remote', '--exit-code', '--symref', 'origin', 'HEAD')
-    refs = re.findall(r'^ref: (refs/heads/[^\s]+)\tHEAD$', advertised, re.MULTILINE)
-    shas = re.findall(r'^([0-9a-f]{40}|[0-9a-f]{64})\tHEAD$', advertised, re.MULTILINE)
-    if len(refs) != 1 or len(shas) != 1:
-        raise DispatchError('remote_default_unavailable')
-    # Fetch the advertised SHA, not a mutable FETCH_HEAD or a stale origin/HEAD.
-    call('fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', 'origin', shas[0])
-    resolved = call('rev-parse', '--verify', shas[0] + '^{commit}').strip()
-    if resolved != shas[0]:
-        raise DispatchError('remote_default_commit_mismatch')
-    return dict(remote='origin', ref=refs[0], sha=resolved, fetched_at=now())
 
 
 def private_write(path, content):
@@ -366,7 +342,7 @@ def start(store, task_id, repo, cli, prompt, auto=False):
     pane('agent-context')
     contract = pane('agent-context', '--command', 'panes create')['command']
     supported = {a['name'] for a in contract['arguments']}
-    if not {'--tool-command', '--initial-input-file', '--agent', '--branch', '--base-branch'} <= supported:
+    if not {'--tool-command', '--initial-input-file', '--agent', '--branch'} <= supported:
         raise DispatchError('unsupported_pane_schema')
     repos = pane('repos', 'list')['repos']
     matches = [r for r in repos if repo in (str(r['id']), r['name'], r['path'])]
@@ -385,7 +361,6 @@ def start(store, task_id, repo, cli, prompt, auto=False):
         name = 'pd-' + digest(task_id)[:32]
         if any(p.get('name') == name for p in pane('panes', 'list')['panes']):
             raise DispatchError('preexisting_pane_without_task_record')
-        base = fresh_base(matches[0]['path'])
         prompt_path = store.root / (digest(task_id) + '.prompt')
         private_write(prompt_path, envelope(task_id, prompt))
         record = dict(task_id=task_id, request=request, repo_id=matches[0]['id'],
@@ -393,12 +368,12 @@ def start(store, task_id, repo, cli, prompt, auto=False):
                       pane_name=name, pane_id=None, panel_id=None, worktree=None,
                       cli_session_id=str(uuid.uuid4()) if cli == 'grok' else None,
                       state='creation_unknown', created_at=now(), pr=None, evidence=None,
-                      selection_evidence=selection_evidence, base=base)
+                      selection_evidence=selection_evidence)
         launch = launch_args(cli, info['path'], prompt_path, record['cli_session_id'])
         record['launch_command'] = launch[launch.index('--tool-command') + 1]
         store.save(record)  # fsync intent BEFORE the only creation attempt, even if we crash.
         args = ['panes', 'create', '--repo', str(record['repo_id']), '--name', name,
-                '--branch', name, '--base-branch', base['sha'], *launch,
+                '--branch', name, *launch,
                 '--source', 'agent', '--no-focus', '--wait-ready', '--yes']
         try:
             result = pane(*args, timeout=60)
