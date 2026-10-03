@@ -1,10 +1,10 @@
 name: Coordinator validation
 on:
   pull_request:
-    paths: ['next_pr/**', 'tests/**', 'scripts/**', '.github/workflows/coordinator.yml']
+    paths: ['next_pr/**', 'pane_dispatch.py', 'bin/**', 'tests/**', 'scripts/**', '.github/workflows/coordinator.yml']
   push:
     branches: [main]
-    paths: ['next_pr/**', 'tests/**', 'scripts/**', '.github/workflows/coordinator.yml']
+    paths: ['next_pr/**', 'pane_dispatch.py', 'bin/**', 'tests/**', 'scripts/**', '.github/workflows/coordinator.yml']
 permissions:
   contents: read
 jobs:
@@ -17,4 +17,5 @@ jobs:
           python-version: '3.11'
       - run: python -m unittest discover -s tests -v
       - run: python -m next_pr --help
+      - run: bin/pane-dispatch --help
       - run: bash -n scripts/open-pr.sh scripts/check-pr.sh
