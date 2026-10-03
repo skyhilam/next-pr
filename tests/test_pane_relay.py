@@ -468,6 +468,25 @@ class RelayTests(unittest.TestCase):
         parsed = d.menu_options('1. Earlier prose\n2. More prose\nTrust folder?\n' + menu)
         self.assertEqual([option['key'] for option in parsed], [None, None])
 
+    def test_unnumbered_duplicate_selectors_across_three_choices_reject_all_keys(self):
+        self.waiting()
+        self.fake.activity = 'active'
+        menus = ('❯ No, exit\n❯ Yes, once\n  Yes, always',
+                 '❯ No, exit\n  Yes, once\n❯ Yes, always',
+                 '  No, exit\n❯ Yes, once\n❯ Yes, always',
+                 ' ❯ No, exit\n   Yes, once\n › Yes, always\n   Ask later')
+        for menu in menus:
+            with self.subTest(menu=menu):
+                self.fake.screen = menu + '\nEnter to confirm'
+                self.assertEqual(d.menu_options(self.fake.screen), [])
+                current = d.status(self.store, 'task-1')['conversation']
+                self.assertEqual(current['options'], [])
+                self.assertFalse(current['replyable'])
+                for key in ('up', 'down', 'enter', '1'):
+                    with self.subTest(key=key), self.assertRaises(d.DispatchError):
+                        d.reply(self.store, 'task-1', 'Fixture choice', current['event_id'], key, key)
+        self.assertFalse(self.fake.sends)
+
     def test_real_permission_menu_ignores_blinking_transcript_chrome(self):
         screens = json.loads((Path(__file__).parent / 'fixtures/claude_read_permission.json').read_text())
         self.waiting()

@@ -343,3 +343,12 @@ Regressions cover Up and Enter against an unchanged active menu, changed-selecti
 navigation, confirmation followed by new screen/agent output, and ordinary idle-to-active
 submission. All queued fixes remain combined on `fix/pane-conversation-relay`; the full
 suite now passes **104 tests**. This worker sends no inputs to the live acceptance task.
+
+## Final parser review: duplicate selectors across the whole menu
+
+The unnumbered parser now includes selected rows while finding the complete contiguous
+aligned choice block, then requires exactly one selector across that block. It cannot
+silently start at the last selector and drop earlier options. The regression reproduces
+three choices with duplicate selectors and checks adjacent/separated selectors, four
+choices and mixed selector glyphs; Up/Down/Enter/numeric requests send no keys.
+All prior fixes remain included. Full suite: **105 tests passed**.

@@ -222,7 +222,8 @@ reply 重新驗證身分及當前 prompt fingerprint，使用 `panels submit --i
 
 TUI 使用 `--key up|down|enter|1..9`，每次只送一個受限按鍵，仍須 reply-file 記錄使用者原始選擇。
 只有當前 screen 有可辨認選單才接受 key，數字必須在該選單出現。無編號選單必須有
-單一 selector、連續對齊的選項與最後一行 Enter to confirm/select 提示；options 的 `key:null`、
+完整連續對齊選項區塊中恰好一個 selector，以及最後一行 Enter to confirm/select 提示；
+多個 selector 一律拒絕，不能從最後一個 selector 開始而丟棄前面選項。options 的 `key:null`、
 `selected` 只描述畫面，僅接受 up/down/enter，不虛構數字快捷鍵。即使 activity 為 active，
 目前明確選單仍回 needs_attention。辨認到 Claude 有框 permission dialog 時，fingerprint 使用
 完整當前 dialog（標題、action/path、說明、問題、selection/options/footer），排除之前 transcript

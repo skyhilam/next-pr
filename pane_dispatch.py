@@ -563,15 +563,18 @@ def menu_options(text):
                 continue
             indent = len(selected[1]) + 2
             start, end = index, index + 1
-            choice = re.compile(r' {' + str(indent) + r'}(\S.*)')
+            choice = re.compile(r' {' + str(indent - 2) + r'}(?:[❯>›] |  )(\S.*)')
             while start > 0 and choice.fullmatch(lines[start - 1]):
                 start -= 1
             while end < len(lines) - 1 and choice.fullmatch(lines[end]):
                 end += 1
             if end != len(lines) - 1 or not 2 <= end - start <= 20:
                 return []
-            labels = [selected[2] if i == index else choice.fullmatch(lines[i])[1]
-                      for i in range(start, end)]
+            # Include other selected rows when finding the entire choice block;
+            # starting at the last selector must not silently drop earlier choices.
+            if sum(bool(match) for i, match in selected_rows if start <= i < end) != 1:
+                return []
+            labels = [choice.fullmatch(lines[i])[1] for i in range(start, end)]
             if any(len(label) > 240 or re.match(r'(?:[❯>›]|\d+[.)]\s)', label) for label in labels):
                 break  # Let explicit numbered menus use their printed shortcuts.
             return [dict(key=None, text=label, selected=start + i == index)
