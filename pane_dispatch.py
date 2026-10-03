@@ -582,6 +582,24 @@ def menu_options(text):
     return [dict(key=key, text=value) for key, value in options] if len(options) >= 2 and (selected or hint) else []
 
 
+def menu_context(text):
+    # Claude's framed permission dialog follows transcript/progress chrome. Keep
+    # its title, action/path, explanatory text, question, selection and footer.
+    # Unknown layouts retain the entire screen rather than hashing labels alone.
+    lines = text.splitlines()
+    if not lines or not re.match(r'^\s*(?:Esc to cancel|Enter to (?:confirm|select))\b', lines[-1], re.I):
+        return text
+    for index in range(len(lines) - 5, -1, -1):
+        if (re.fullmatch(r'\s*[─━]{8,}\s*', lines[index]) and lines[index + 1].strip() and
+                re.fullmatch(r'\s*[╌┄┈]{8,}\s*', lines[index + 2])):
+            # Require the action section's closing border, not just any divider.
+            if any(re.fullmatch(r'\s*[╌┄┈]{8,}\s*', line) for line in lines[index + 4:]):
+                dialog = '\n'.join(lines[index + 1:])
+                if menu_options(dialog):
+                    return dialog
+    return text
+
+
 def observe(record):
     panel = panel_identity(record)
     try:
@@ -609,9 +627,10 @@ def observe(record):
     record['terminal_evidence'] = dict(provenance='pane_terminal_screen', source=screen.get('source'),
                                        excerpt=text, truncated=screen_truncated,
                                        untrusted=True)
-    options = menu_options(text)
+    context = menu_context(text)
+    options = menu_options(context)
     message = reads.get('last-message', {})
-    content_signature = digest(message.get('text', '') if message.get('text') and not options else text)
+    content_signature = digest(message.get('text', '') if message.get('text') and not options else context)
     report = panel.get('report')
     evidence = report_evidence(report, record['task_id']) if report else None
     record['evidence'] = evidence
@@ -658,9 +677,12 @@ def observe(record):
                         activity=activity.get('activityStatus'), read_errors=errors,
                         held_input=bool(screen.get('composer', {}).get('hasUndeliveredText')),
                         report_key=report_key, content_signature=content_signature)
-    # Freeze the legacy epoch so upgrading does not invalidate a pending prompt's ID.
+    if options:
+        conversation.update(menu_context=context, fingerprint_provenance=(
+            'pane_menu_dialog' if context != text else 'pane_terminal_screen'))
+    # Keep the legacy epoch fixed; activity changes alone are not a new prompt.
     fingerprint = dict(pane=record['pane_id'], panel=record['panel_id'], source=source,
-                       text=excerpt, options=options, epoch=record.get('turn_epoch', 0))
+                       text=context if options else excerpt, options=options, epoch=record.get('turn_epoch', 0))
     if source == 'pane_worker_report':
         fingerprint['report'] = report_key
     signature = digest(json.dumps(fingerprint, sort_keys=True, ensure_ascii=False))

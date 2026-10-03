@@ -215,7 +215,11 @@ TUI 使用 `--key up|down|enter|1..9`，每次只送一個受限按鍵，仍須 
 只有當前 screen 有可辨認選單才接受 key，數字必須在該選單出現。無編號選單必須有
 單一 selector、連續對齊的選項與最後一行 Enter to confirm/select 提示；options 的 `key:null`、
 `selected` 只描述畫面，僅接受 up/down/enter，不虛構數字快捷鍵。即使 activity 為 active，
-目前明確選單仍回 needs_attention。每次 key 後 status，
+目前明確選單仍回 needs_attention。辨認到 Claude 有框 permission dialog 時，fingerprint 使用
+完整當前 dialog（標題、action/path、說明、問題、selection/options/footer），排除之前 transcript
+的閃爍進度符號；原始 excerpt/terminal evidence 仍保留。`menu_context` 與
+`fingerprint_provenance` 說明取材；未知版面保留全畫面，不只 hash 選項文字。升級後先 status
+取得當前 event，再回覆；每次 key 後 status，
 確認選取項目及當前 event_id，才送下一鍵。例如使用者已選 Ready，就 down、觀察 Ready 已選中、
 enter；不再問一次許可。已確認送出的 up/down 回傳 `action:navigate`、
 `consumes_event:false`；例如第一項再 up 令 screen/event 不變，仍可用相同 event_id、不同 reply_id

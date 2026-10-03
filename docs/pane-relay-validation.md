@@ -277,3 +277,24 @@ advanced to a numbered outside-worktree read permission menu. No input or status
 write was sent to that task; the unnumbered regression uses the parent's reported text.
 User trust/permission decisions and real smoke continuation remain with parent.
 The complete suite now passes **94 tests**.
+
+## Real smoke follow-up: blinking progress before a permission menu
+
+The parent supplied two exact conversations in `/private/tmp/pane-relay-unstable-menu.json`.
+Only the prior `Reading ...prompt` progress marker changed between spaces and `⏺`;
+the same four-option read permission menu remained current. A sanitized fixture replaces
+private paths/task context with `/fixture` placeholders while preserving the menu layout
+and exact blinking difference in `tests/fixtures/claude_read_permission.json`. The regression reproduced different event
+IDs on the original local capture and now verifies stable IDs/content signatures and one user-bound navigation delivery
+across the two phases. No live panel keys or task-state writes were used for this check.
+
+For the recognized framed Claude permission layout, `menu_context` retains the dialog
+heading, action/path, explanation, question, selection, options and footer. The full
+original screen stays in excerpt/terminal evidence. `fingerprint_provenance` identifies
+`pane_menu_dialog`; unknown layouts retain the full screen (`pane_terminal_screen`).
+Separate guard tests change the title, action, path, question, option or selection with
+otherwise identical labels and verify stale replies are rejected. Fingerprints never
+collapse to option labels alone. A pending pre-upgrade event must be refreshed with status
+before replying; the newly observed event stays stable across the recorded blink phases.
+All earlier review fixes and unnumbered-menu tests remain included: **97 tests pass**.
+Parent will resume real smoke after installation and the user's permission choice.

@@ -320,6 +320,61 @@ class RelayTests(unittest.TestCase):
         parsed = d.menu_options('1. Earlier prose\n2. More prose\nTrust folder?\n' + menu)
         self.assertEqual([option['key'] for option in parsed], [None, None])
 
+    def test_real_permission_menu_ignores_blinking_transcript_chrome(self):
+        screens = json.loads((Path(__file__).parent / 'fixtures/claude_read_permission.json').read_text())
+        self.waiting()
+        self.fake.activity = 'active'
+        self.fake.screen = screens[0]
+        first = d.status(self.store, 'task-1')['conversation']
+        self.fake.screen = screens[1]
+        second = d.status(self.store, 'task-1')['conversation']
+        self.assertEqual(first['event_id'], second['event_id'])
+        self.assertEqual(first['content_signature'], second['content_signature'])
+        self.assertFalse(second['new'])
+        self.assertEqual(second['excerpt'], screens[1])  # evidence remains verbatim
+        self.assertEqual(second['fingerprint_provenance'], 'pane_menu_dialog')
+        self.assertIn('Read(/fixture/', second['menu_context'])
+        self.assertIn('Allow this read outside the working directories?', second['menu_context'])
+        self.assertNotIn('Reading /fixture/', second['menu_context'])
+        # Revalidation sees the other blink phase; user-bound navigation still sends once.
+        self.fake.screen = screens[0]
+        sent = d.reply(self.store, 'task-1', 'Fixture navigation', second['event_id'], 'down', 'down')
+        self.fake.screen = screens[1]
+        self.assertEqual(d.reply(self.store, 'task-1', 'Fixture navigation', second['event_id'], 'down', 'down'), sent)
+        self.assertEqual(len(self.fake.sends), 1)
+
+    def test_permission_menu_fingerprint_retains_question_action_path_and_selection(self):
+        screen = json.loads((Path(__file__).parent / 'fixtures/claude_read_permission.json').read_text())[0]
+        self.waiting()
+        self.fake.activity = 'active'
+        changes = [(' Read(', ' Write('), (' Read(/fixture/', ' Read(/different/path/'),
+                   (' Allow this read', ' Deny this read'),
+                   (' Read outside the working directories', ' Write outside the working directories'),
+                   ('Yes, but ask again next time', 'Yes, permanently'),
+                   (' ❯ 1.', '   1.')]
+        for old, new in changes:
+            with self.subTest(change=old):
+                self.fake.screen = screen
+                first = d.status(self.store, 'task-1')['conversation']
+                self.fake.screen = screen.replace(old, new)
+                if old == ' ❯ 1.':
+                    self.fake.screen = self.fake.screen.replace('   4.', ' ❯ 4.')
+                changed = d.status(self.store, 'task-1')['conversation']
+                self.assertNotEqual(first['event_id'], changed['event_id'])
+                self.assertNotEqual(first['content_signature'], changed['content_signature'])
+                with self.assertRaisesRegex(d.DispatchError, 'stale'):
+                    d.reply(self.store, 'task-1', 'Fixture choice', first['event_id'], 'stale', 'enter')
+        self.assertFalse(self.fake.sends)
+
+    def test_unframed_menu_fingerprint_keeps_full_question_context(self):
+        self.waiting()
+        self.fake.screen = 'Read /first/path?\n❯ 1. Yes\n  2. No'
+        first = d.status(self.store, 'task-1')['conversation']
+        self.fake.screen = 'Read /second/path?\n❯ 1. Yes\n  2. No'
+        second = d.status(self.store, 'task-1')['conversation']
+        self.assertNotEqual(first['event_id'], second['event_id'])
+        self.assertEqual(second['fingerprint_provenance'], 'pane_terminal_screen')
+
     def test_boundary_navigation_keeps_same_event_available_for_enter(self):
         self.waiting()
         self.fake.screen = '> 1. Blue\n  2. Green'
