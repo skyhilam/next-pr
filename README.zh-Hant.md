@@ -1,5 +1,7 @@
 # next-pr 本機持久協調器
 
+> 主 Grok Bot 桌面協調請使用獨立的 [Pane dispatcher](docs/pane-dispatch.zh-Hant.md)：先建議、等使用者選 CLI、Pane worktree、草稿 PR、使用者 merge。此流程不呼叫下方舊協調器或 next-pr skill。
+
 每個需求有獨立 worktree、分支、草稿 PR，同一時間只有一位寫入者。
 Python 3.11+ / SQLite 記錄任務及 CLI 完成收據；關閉聊天或重啟管理程序
 不會令系統盲目重開第二個寫入者。原有 [SKILL](SKILL.md) 仍可獨立使用，

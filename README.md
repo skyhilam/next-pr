@@ -1,5 +1,7 @@
 # next-pr
 
+> For main Grok Bot desktop coordination, use the independent [Pane dispatcher](docs/pane-dispatch.zh-Hant.md): recommend → user selects → Pane worktree → draft PR → user merges. This workflow does not invoke the skill or persistent coordinator below.
+
 One request, one isolated worktree, one draft PR, one writer. The original
 [agent skill](SKILL.md) remains available. The optional Python coordinator runs
 local subscription CLIs independently of a chat session and records their actual
