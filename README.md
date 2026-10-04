@@ -95,6 +95,20 @@ Workers are separate supervisors and survive a manager restart.
 
 ## Submit and operate
 
+After initialization, start the local dashboard in a separate terminal:
+
+```sh
+python3 -m next_pr ui --port 8765
+```
+
+Open `http://127.0.0.1:8765/` (or `http://localhost:8765/`). The default port is
+8765. For a custom state directory, use `python3 -m next_pr --home /path/to/state ui`.
+The server runs in the foreground; stop it with Ctrl-C. It does not start the
+coordinator. Select a run's **對話** button in the task list to read its Markdown
+conversation and terminal output, alongside task controls and coordinator status.
+The dashboard accepts only these loopback Host names with the selected port;
+task-control POST requests must include the matching `http://host:port` Origin.
+
 Write the complete request to a UTF-8 text file, then:
 
 ```sh

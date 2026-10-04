@@ -247,8 +247,7 @@ PAGE = """<!doctype html>
 </main>
 <script>
 const STEPS = [['排隊','queue'],['拆任務','split'],['寫作','work'],['等 CI','ci'],['合併','merge']];
-const ROLE = {handle:'拆任務', code:'寫程式', design:'設計', accept:'驗收', integrate:'整合', review:'審查', validation:'驗證'};
-const ITEM = {pending:'未開始', running:'進行中', done:'完成', blocked:'停住'};
+const ROLE = {handle:'拆任務', writer:'寫程式', code:'寫程式', design:'設計', accept:'驗收', integrate:'整合', review:'審查', validation:'驗證'};
 let busy = false;
 async function act(id, action) {
   if (busy) return;
@@ -279,10 +278,6 @@ let openKeys = new Set();
 let talkSignature = '';
 let talkTicket = 0;
 const emptyThread = document.getElementById('viewer-body').innerHTML;
-function latestRun(taskId, role) {
-  const matches = state.runs.filter(run => run.task_id === taskId && run.role === role);
-  return matches.length ? matches[matches.length - 1] : null;
-}
 function inlineMarkdown(text) {
   const codes = [];
   let body = text.replace(/`([^`\\n]+)`/g, (_, code) => {
@@ -498,11 +493,12 @@ function taskRow(task) {
     else if (index === here) cls = 'now';
     return '<li class="' + cls + '">' + step[0] + '</li>';
   }).join('');
-  const items = (task.items || []).map(item => {
-    const run = latestRun(task.id, item.role);
-    const talk = run ? '<button onclick="showTalk(\\'' + run.id + '\\')">對話</button>' : '';
-    return '<div class="item"><span>' + esc(ITEM[item.status] || item.status) + ' · '
-      + esc(ROLE[item.role] || item.role) + ' · ' + esc(item.title) + '</span>' + talk + '</div>';
+  const runs = state.runs.filter(run => run.task_id === task.id).slice().reverse().map(run => {
+    const talk = '<button onclick="showTalk(\\'' + run.id + '\\')">對話</button>';
+    const status = run.exit_code === null ? '運行中' : run.exit_code === 0 ? '已完成' : '已停止';
+    return '<div class="item"><span>' + esc(ROLE[run.role] || run.role) + ' · '
+      + esc(run.provider) + ' · ' + status + ' · ' + esc(run.when)
+      + ' · ' + esc(run.id.slice(0, 8)) + '</span>' + talk + '</div>';
   }).join('');
   const pr = task.pr_url ? '<a href="' + esc(task.pr_url) + '">PR ' + esc(task.pr_number) + '</a>' : '';
   const terminal = ['merged','cancelled','answered'].includes(task.stage);
@@ -521,7 +517,7 @@ function taskRow(task) {
     + '<div class="badge ' + badge + '">' + esc(task.stage_label) + '</div></div>'
     + '<ol class="steps">' + steps + '</ol>'
     + (task.plain_note ? '<p class="plain">' + esc(task.plain_note) + '</p>' : '')
-    + items
+    + runs
     + '<div class="actions">' + actions + '</div></article>';
 }
 function nowLine(tasks) {
@@ -585,8 +581,6 @@ def snapshot(store):
             'stage_label': label, 'step': step, 'paused': bool(task.get('paused')),
             'note': task.get('note') or '', 'plain_note': plain_note(task.get('note') or ''),
             'pr_number': task.get('pr_number'), 'pr_url': pr_url,
-            'items': [{'id': item.get('id'), 'role': item.get('role'), 'title': item.get('title'),
-                       'status': item.get('status')} for item in task.get('items') or []],
         })
     runs = []
     for run in sorted(store.runs(), key=lambda item: item.get('created_at') or 0):
@@ -850,6 +844,17 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
         return
 
+    def allowed_request(self, mutation=False):
+        hosts = self.headers.get_all('Host', [])
+        allowed = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
+        if len(hosts) != 1 or hosts[0] not in allowed:
+            self.send_json({'blocked': 'invalid host'}, 403)
+            return False
+        if mutation and self.headers.get_all('Origin', []) != ['http://' + hosts[0]]:
+            self.send_json({'blocked': 'same-origin request required'}, 403)
+            return False
+        return True
+
     def finish_json(self, build, status=200):
         store = Store(self.home)
         try:
@@ -869,6 +874,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if not self.allowed_request():
+            return
         parsed = urlparse(self.path)
         if parsed.path == '/':
             body = PAGE.encode()
@@ -880,7 +887,11 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == '/api/state':
             self.finish_json(snapshot)
         elif parsed.path.startswith('/runs/'):
-            _runs, run_id, which = parsed.path.split('/')[1:]
+            parts = parsed.path.split('/')
+            if len(parts) != 4 or not parts[2] or parts[3] not in {'transcript', 'stdout', 'stderr'}:
+                self.send_json({'blocked': 'not found'}, 404)
+                return
+            _, _runs, run_id, which = parts
             if which == 'transcript':
                 self.finish_json(lambda store: transcript(store.home, run_id))
             else:
@@ -889,6 +900,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({'blocked': 'not found'}, 404)
 
     def do_POST(self):
+        if not self.allowed_request(mutation=True):
+            return
         parts = urlparse(self.path).path.split('/')
         if len(parts) == 4 and parts[1] == 'tasks':
             self.finish_json(lambda store: act(store, parts[2], parts[3]))
@@ -900,6 +913,6 @@ def serve(home, host, port):
     if host != '127.0.0.1':
         raise Blocked('the status page listens on 127.0.0.1 only')
     Handler.home = home
-    server = ThreadingHTTPServer((host, port), Handler)
-    print(f'http://{host}:{port}/', flush=True)
-    server.serve_forever()
+    with ThreadingHTTPServer((host, port), Handler) as server:
+        print(f'http://{host}:{server.server_port}/', flush=True)
+        server.serve_forever()

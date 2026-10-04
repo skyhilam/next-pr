@@ -8,7 +8,7 @@ import signal
 import sys
 import time
 
-from . import engine, providers
+from . import engine, providers, ui
 from .common import Blocked, atomic_json, command, lock, now, read_json
 from .state import Store, config, default_home, initial_config, repo_config
 
@@ -28,6 +28,8 @@ def parser():
     submit.add_argument('--depends-on', action='append', default=[])
     sub.add_parser('status', help='Show durable task/provider facts; unknown quotas stay unknown')
     sub.add_parser('metrics', help='Report first ten tasks, durations, rework and emitted usage')
+    page = sub.add_parser('ui', help='Serve the local task and conversation dashboard')
+    page.add_argument('--port', type=int, default=8765, help='Loopback HTTP port (default: 8765)')
     for name in ('pause', 'resume', 'cancel'):
         control = sub.add_parser(name)
         control.add_argument('task', nargs='?', help='Task id (omit pause/resume for global scheduling)')
@@ -214,6 +216,9 @@ def main(argv=None):
     os.umask(0o077)
     store = None
     try:
+        if args.command == 'ui':
+            ui.serve(args.home, '127.0.0.1', args.port)
+            return 0
         store = Store(args.home)
         if args.command == 'daemon':
             daemon(store, args.once)

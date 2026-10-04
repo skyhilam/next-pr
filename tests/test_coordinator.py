@@ -1,18 +1,21 @@
+from io import BytesIO
 import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from next_pr import engine, github, providers, runner
-from next_pr.cli import activation_gate, recover
+from next_pr.cli import activation_gate, main, recover
 from next_pr.common import Blocked, atomic_json, lock, lock_held, now, read_json
 from next_pr.state import Store, initial_config, overlaps, repo_config
-from next_pr.ui import PAGE, transcript
+from next_pr.ui import Handler, PAGE, snapshot, transcript
 
 SHA = 'a' * 40
 OTHER = 'b' * 40
@@ -556,6 +559,118 @@ class CrashTests(Fixture):
         with self.assertRaisesRegex(Blocked, 'outside'):
             Store(path / 'state')
         self.assertFalse((path / 'state').exists())
+
+
+class DashboardTests(Fixture):
+    @patch('next_pr.cli.ui.serve')
+    def test_cli_ui_dispatches_without_holding_state_lock(self, serve):
+        with patch('next_pr.cli.Store') as store:
+            for options, port in (([], 8765), (['--port', '9001'], 9001)):
+                self.assertEqual(main(['--home', str(self.home), 'ui', *options]), 0)
+                serve.assert_called_with(self.home, '127.0.0.1', port)
+            store.assert_not_called()
+
+    @unittest.skipUnless(shutil.which('node'), 'Node is needed for browser JavaScript checks')
+    def test_real_store_snapshot_opens_every_run_without_task_items(self):
+        task = self.task()
+        self.assertNotIn('items', task)
+        logs = {}
+        for index, run_id in enumerate(('ab' * 16, 'cd' * 16)):
+            directory = self.home / 'runs' / run_id
+            directory.mkdir(parents=True)
+            (directory / 'prompt.txt').write_text('# Request\n- Keep `code`')
+            (directory / 'stdout.log').write_text(json.dumps({'type': 'text', 'data': '## Reply\nDone'}))
+            self.store.save_run(dict(id=run_id, task_id=task['id'], role='writer',
+                                     provider='codex', created_at=now() + index,
+                                     directory=str(directory),
+                                     receipt={'exit_code': 0} if index == 0 else None))
+            logs[run_id] = transcript(self.home, run_id)
+        other = self.task(scope='web', key='two')
+        page_state = snapshot(self.store)
+        self.assertEqual(len(page_state['runs']), 2)
+        self.assertNotIn('items', page_state['tasks'][0])
+        self.assertEqual(page_state['tasks'][1]['id'], other['id'])
+        check = Path(__file__).with_name('ui_page.cjs')
+        result = subprocess.run(['node', str(check)], input=json.dumps({
+            'page': PAGE, 'state': page_state, 'logs': logs}), text=True,
+            capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+class DashboardHTTPTests(Fixture):
+    def request(self, path, method='GET', headers=None):
+        if headers is None:
+            headers = [('Host', '127.0.0.1:8765')]
+        raw = f'{method} {path} HTTP/1.1\r\n'
+        raw += ''.join(f'{key}: {value}\r\n' for key, value in headers) + '\r\n'
+        response = bytearray()
+        connection = SimpleNamespace(makefile=lambda *_: BytesIO(raw.encode()),
+                                     sendall=response.extend)
+        server = SimpleNamespace(server_port=8765)
+        with patch.object(Handler, 'home', self.home):
+            Handler(connection, ('127.0.0.1', 12345), server)
+        head, body = bytes(response).split(b'\r\n\r\n', 1)
+        status = int(head.split()[1])
+        if b'application/json' in head:
+            return status, json.loads(body)
+        return status, body.decode()
+
+    def test_valid_hosts_can_read_page_state_and_transcript(self):
+        task = self.task()
+        run_id = 'ab' * 16
+        directory = self.home / 'runs' / run_id
+        directory.mkdir(parents=True)
+        (directory / 'prompt.txt').write_text('Private prompt')
+        for host in ('127.0.0.1:8765', 'localhost:8765'):
+            with self.subTest(host=host):
+                headers = [('Host', host)]
+                self.assertEqual(self.request('/', headers=headers), (200, PAGE))
+                status, body = self.request('/api/state', headers=headers)
+                self.assertEqual(status, 200)
+                self.assertEqual(body['tasks'][0]['id'], task['id'])
+                status, body = self.request(f'/runs/{run_id}/transcript', headers=headers)
+                self.assertEqual(status, 200)
+                self.assertEqual(body['messages'][0]['text'], 'Private prompt')
+
+    def test_invalid_hosts_rejected_before_reading_or_mutating(self):
+        for hosts in ([], ['attacker.example:8765'], ['127.0.0.1:9001'], ['localhost'],
+                      ['127.0.0.1:8765', 'attacker.example:8765']):
+            for method, path in (('GET', '/'), ('GET', '/api/state'),
+                                 ('GET', '/runs/' + 'ab' * 16 + '/transcript'),
+                                 ('POST', '/tasks/id/pause')):
+                with self.subTest(hosts=hosts, method=method, path=path), \
+                        patch('next_pr.ui.Store') as store:
+                    headers = [('Host', host) for host in hosts]
+                    headers.append(('Origin', 'http://127.0.0.1:8765'))
+                    self.assertEqual(self.request(path, method, headers),
+                                     (403, {'blocked': 'invalid host'}))
+                    store.assert_not_called()
+
+    def test_post_requires_exact_same_origin_and_preserves_controls(self):
+        for host in ('127.0.0.1:8765', 'localhost:8765'):
+            origins = ([], ['null'], ['https://' + host], ['http://attacker.example:8765'],
+                       ['http://localhost:9001'], ['http://' + host, 'http://' + host],
+                       ['http://' + ('localhost:8765' if host.startswith('127') else '127.0.0.1:8765')])
+            for origin in origins:
+                with self.subTest(host=host, origin=origin), patch('next_pr.ui.Store') as store:
+                    headers = [('Host', host)] + [('Origin', value) for value in origin]
+                    self.assertEqual(self.request('/tasks/id/pause', 'POST', headers),
+                                     (403, {'blocked': 'same-origin request required'}))
+                    store.assert_not_called()
+            for action in ('pause', 'resume', 'cancel'):
+                with self.subTest(host=host, action=action), \
+                        patch('next_pr.ui.act', return_value={'ok': True}) as act:
+                    headers = [('Host', host), ('Origin', 'http://' + host)]
+                    self.assertEqual(self.request('/tasks/id/' + action, 'POST', headers),
+                                     (200, {'ok': True}))
+                    self.assertEqual(act.call_args.args[1:], ('id', action))
+
+    def test_malformed_run_routes_return_json_404(self):
+        run = 'ab' * 16
+        for path in ('/runs/', f'/runs/{run}', f'/runs/{run}/', '/runs//transcript',
+                     f'/runs/{run}/transcript/extra', f'/runs/{run}/unknown'):
+            with self.subTest(path=path):
+                self.assertEqual(self.request(path), (404, {'blocked': 'not found'}))
 
 
 class TranscriptTests(Fixture):
