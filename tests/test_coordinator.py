@@ -12,6 +12,7 @@ from next_pr import engine, github, providers, runner
 from next_pr.cli import activation_gate, recover
 from next_pr.common import Blocked, atomic_json, lock, lock_held, now, read_json
 from next_pr.state import Store, initial_config, overlaps, repo_config
+from next_pr.ui import PAGE, transcript
 
 SHA = 'a' * 40
 OTHER = 'b' * 40
@@ -555,3 +556,101 @@ class CrashTests(Fixture):
         with self.assertRaisesRegex(Blocked, 'outside'):
             Store(path / 'state')
         self.assertFalse((path / 'state').exists())
+
+
+class TranscriptTests(Fixture):
+    def test_transcript_shows_speech_tools_and_refuses_other_runs(self):
+        run = self.home / 'runs' / ('ab' * 16)
+        run.mkdir(parents=True)
+        (run / 'prompt.txt').write_text('Please change the label')
+        (run / 'manifest.json').write_text(json.dumps({'provider': 'grok', 'role': 'code'}))
+        contract = json.dumps({'status': 'completed', 'summary': 'Label updated', 'tests': [], 'blockers': []})
+        (run / 'stdout.log').write_text('\n'.join([
+            json.dumps({'type': 'thought', 'data': 'Looking'}),
+            json.dumps({'type': 'thought', 'data': ' at the file'}),
+            json.dumps({'type': 'tool_call', 'toolCallId': 'c1', 'toolName': 'read_file',
+                        'rawInput': {'target_file': 'app/Label.kt'}}),
+            json.dumps({'type': 'tool_call_update', 'toolCallId': 'c1', 'status': 'completed',
+                        'content': [{'type': 'content', 'content': 'class Label'}]}),
+            json.dumps({'type': 'text', 'data': contract[:8]}),
+            json.dumps({'type': 'text', 'data': contract[8:]}),
+        ]) + '\n')
+        page = transcript(self.home, 'ab' * 16)
+        self.assertEqual(page['provider'], 'grok')
+        self.assertEqual([item['kind'] for item in page['messages']], ['prompt', 'thought', 'tool', 'say'])
+        self.assertEqual(page['messages'][0]['text'], 'Please change the label')
+        self.assertEqual(page['messages'][1]['text'], 'Looking at the file')
+        self.assertIn('Label.kt', page['messages'][2]['text'])
+        self.assertIn('class Label', page['messages'][2]['text'])
+        self.assertEqual(page['messages'][2]['tool'], 'read_file')
+        self.assertEqual(page['messages'][2]['command'], 'app/Label.kt')
+        self.assertEqual(page['messages'][2]['output'], 'class Label')
+        self.assertEqual(page['messages'][2]['calls'], [
+            {'tool': 'read_file', 'command': 'app/Label.kt', 'output': 'class Label'}])
+        self.assertIn('Label updated', page['messages'][3]['text'])
+        run = self.home / 'runs' / ('cd' * 16)
+        run.mkdir()
+        (run / 'prompt.txt').write_text('Look')
+        calls = []
+        for index, name in enumerate(('read_file', 'grep', 'grep')):
+            calls.append(json.dumps({'type': 'tool_call', 'toolCallId': str(index), 'toolName': name,
+                                     'rawInput': {'target_file': 'a.kt'}}))
+        calls.append(json.dumps({'type': 'text', 'data': json.dumps(self.result())}))
+        (run / 'stdout.log').write_text('\n'.join(calls) + '\n')
+        grouped = transcript(self.home, 'cd' * 16)
+        self.assertEqual([item['kind'] for item in grouped['messages']], ['prompt', 'tool', 'say'])
+        self.assertIn('3 次', grouped['messages'][1]['title'])
+        self.assertIn('read_file 1', grouped['messages'][1]['title'])
+        grouped_calls = grouped['messages'][1]['calls']
+        self.assertEqual(len(grouped_calls), 3)
+        self.assertEqual([item['tool'] for item in grouped_calls], ['read_file', 'grep', 'grep'])
+        self.assertEqual([item['command'] for item in grouped_calls], ['a.kt', 'a.kt', 'a.kt'])
+        self.assertTrue(all(item['output'] == '' for item in grouped_calls))
+        self.assertIn('id="viewer"', PAGE)
+        self.assertIn('id="now"', PAGE)
+        self.assertIn('協調器紀錄', PAGE)
+        self.assertNotIn('運行同對話', PAGE)
+        self.assertNotIn('if (openRun) loadTalk()', PAGE)
+        with self.assertRaisesRegex(Blocked, 'unknown log'):
+            transcript(self.home, '../config')
+
+    def test_transcript_keeps_order_clips_and_splits_stderr(self):
+        run = self.home / 'runs' / ('ef' * 16)
+        run.mkdir(parents=True)
+        prompt = 'P' * 5000
+        (run / 'prompt.txt').write_text(prompt)
+        (run / 'stdout.log').write_text('\n'.join([
+            json.dumps({'type': 'thought', 'data': 'Hmm'}),
+            json.dumps({'type': 'error', 'message': 'model blew up'}),
+            json.dumps({'type': 'tool_call', 'toolCallId': 'a', 'toolName': 'read_file',
+                        'rawInput': {'target_file': 'left.kt'}}),
+            json.dumps({'type': 'text', 'data': 'between'}),
+            json.dumps({'type': 'tool_call', 'toolCallId': 'b', 'toolName': 'grep',
+                        'rawInput': {'command': 'rg label'}}),
+            json.dumps({'type': 'tool_call_update', 'toolCallId': 'b', 'status': 'completed',
+                        'rawOutput': 'Y' * 2500}),
+        ]) + '\n')
+        (run / 'stderr.log').write_text('E' * 5000)
+        page = transcript(self.home, 'ef' * 16)
+        self.assertEqual([item['kind'] for item in page['messages']],
+                         ['prompt', 'thought', 'error', 'tool', 'say', 'tool', 'error'])
+        self.assertEqual(page['messages'][0]['text'], prompt)
+        self.assertEqual(page['messages'][1]['text'], 'Hmm')
+        model, stderr = page['messages'][2], page['messages'][6]
+        self.assertEqual(model['source'], 'model')
+        self.assertEqual(model['title'], '錯誤')
+        self.assertEqual(model['text'], 'model blew up')
+        self.assertEqual(stderr['source'], 'stderr')
+        self.assertEqual(stderr['title'], 'stderr')
+        self.assertNotEqual(model['source'], stderr['source'])
+        self.assertEqual(stderr['text'], ('E' * 4000) + '\n…已截短')
+        self.assertEqual(page['messages'][3]['command'], 'left.kt')
+        self.assertEqual(page['messages'][3]['output'], '')
+        self.assertEqual(page['messages'][4]['text'], 'between')
+        trailed = page['messages'][5]
+        self.assertEqual(trailed['tool'], 'grep')
+        self.assertEqual(trailed['command'], 'rg label')
+        self.assertEqual(trailed['output'], ('Y' * 2000) + '\n…已截短')
+        self.assertNotIn('Y' * 2500, trailed['text'])
+        self.assertIn('rg label', trailed['text'])
+        self.assertEqual(trailed['calls'][0]['output'], trailed['output'])
