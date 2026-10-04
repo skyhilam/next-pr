@@ -91,48 +91,74 @@ def present_task(task):
 
 
 PAGE = """<!doctype html>
+<html lang="zh-Hant">
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>next-pr</title>
 <style>
-  :root { color-scheme: dark; }
+  :root { color-scheme: dark; --line: #303237; --muted: #a3a7af;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
-  body { margin: 0; min-height: 100vh; display: flex; flex-direction: column;
-    background: #121212; color: #ececec;
-    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "PingFang TC", "Noto Sans TC", sans-serif; }
-  header, main { padding: 12px 16px; }
-  main { flex: 1 1 auto; min-height: 0; width: 100%; max-width: 1120px; margin: 0 auto;
-    display: flex; flex-direction: column; gap: 10px; }
-  header { flex: 0 0 auto; display: flex; justify-content: space-between; gap: 16px; align-items: baseline;
-    border-bottom: 1px solid #2c2c2c; }
-  h1 { font-size: 18px; margin: 0; font-weight: 600; }
-  #now { font-size: 16px; margin: 0; }
-  #flash { margin: 0; }
-  .muted { color: #9a9a9a; }
-  .ok { color: #8fd48f; } .bad { color: #f0a0a0; } .wait { color: #e6c87a; }
-  .workspace { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
+  body { margin: 0; height: 100vh; height: 100dvh; display: flex; flex-direction: column;
+    background: #151619; color: #e8e9ed;
+    font: 14px/1.6 ui-sans-serif, system-ui, -apple-system, "PingFang TC", "Noto Sans TC", sans-serif; }
+  button, a, summary { -webkit-tap-highlight-color: transparent; }
+  button, summary { cursor: pointer; }
+  :focus-visible { outline: 2px solid #b9cdf7; outline-offset: 3px; }
+  a { color: #b9cdf7; overflow-wrap: anywhere; }
+  .app-header { flex: 0 0 auto; display: flex; flex-wrap: wrap; justify-content: space-between;
+    gap: 8px 24px; padding: 12px 20px; align-items: center; border-bottom: 1px solid var(--line); }
+  .brand, .health { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; min-width: 0; }
+  h1 { font: 650 17px/1.5 var(--mono); margin: 0; }
+  h2 { font-size: 14px; font-weight: 600; margin: 0; }
+  .health { font-size: 12px; overflow-wrap: anywhere; }
+  main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+  .status-bar { flex: 0 0 auto; padding: 10px 20px; border-bottom: 1px solid var(--line); background: #1b1c20; }
+  #now { margin: 0; overflow-wrap: anywhere; }
+  #flash { margin: 4px 0 0; font-size: 13px; overflow-wrap: anywhere; }
+  #flash:empty { display: none; }
+  .muted { color: var(--muted); }
+  .ok { color: #9bd3aa; } .bad { color: #f0a0a0; } .wait { color: #e6c87a; }
+  .workspace { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 30%); }
+  .sidebar { min-width: 0; min-height: 0; display: flex; flex-direction: column;
+    background: #1b1c20; border-left: 1px solid var(--line); }
+  .sidebar-heading { padding: 14px 16px; border-bottom: 1px solid var(--line); }
   #tasks { flex: 1 1 auto; min-height: 0; overflow: auto; }
-  #tasks article { background: #1b1b1b; border: 1px solid #333; border-radius: 10px; padding: 14px 16px; margin: 0 0 12px; }
-  #tasks article.stop { border-color: #6e4040; }
-  .top { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
-  .title { font-size: 17px; }
-  .badge { border: 1px solid #555; border-radius: 999px; padding: 2px 10px; font-size: 13px; white-space: nowrap; }
-  .steps { display: flex; gap: 8px; list-style: none; padding: 0; margin: 12px 0; flex-wrap: wrap; }
-  .steps li { color: #777; font-size: 13px; padding-top: 4px; border-top: 2px solid #333; min-width: 4.5em; }
-  .steps li.done { color: #8fd48f; border-color: #3d6b3d; }
-  .steps li.now { color: #fff; border-color: #d7c07a; font-weight: 650; }
+  #tasks > .muted { padding: 0 16px; }
+  .task-row { border-bottom: 1px solid var(--line); border-left: 2px solid transparent; padding: 14px; }
+  .task-row.stop { border-left-color: #d68181; }
+  .top { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; min-width: 0; }
+  .task-info { min-width: 0; }
+  .title { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+  .task-meta { font: 11px/1.6 var(--mono); margin-top: 3px; }
+  .badge { border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px;
+    font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+  .steps { display: flex; gap: 6px; list-style: none; padding: 0; margin: 10px 0; flex-wrap: wrap; }
+  .steps li { flex: 1; color: var(--muted); font-size: 11px; padding-top: 4px; border-top: 2px solid #393b41; }
+  .steps li.done { color: #9bd3aa; border-color: #4c7456; }
+  .steps li.now { color: #ececec; border-color: #d7c07a; font-weight: 650; }
   .steps li.stop { color: #f0a0a0; border-color: #a45; font-weight: 650; }
-  .plain { margin: 8px 0; }
-  .item { display: flex; justify-content: space-between; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid #2a2a2a; }
-  .item span { flex: 1 1 auto; min-width: 0; }
-  button { background: #2a2a2a; color: inherit; border: 1px solid #555; border-radius: 6px; padding: 4px 10px; white-space: nowrap; flex: 0 0 auto; }
-  button.primary { background: #31422c; border-color: #6d8f64; }
-  .actions { margin-top: 10px; display: flex; gap: 8px; }
-  #viewer[hidden] { display: none; }
-  #viewer:not([hidden]) { flex: 1.4 1 0; min-height: 0; display: flex; flex-direction: column;
-    background: #161616; border: 1px solid #2e2e2e; border-radius: 12px; }
-  .viewer-bar { padding: 10px 14px; border-bottom: 1px solid #2a2a2a; align-items: center; }
-  #viewer-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 14px 18px; }
+  .plain { margin: 8px 0; font-size: 12px; color: #c2c5cc; overflow-wrap: anywhere; }
+  .item { display: flex; justify-content: space-between; gap: 8px; align-items: center;
+    padding: 7px 0; border-top: 1px solid #2a2c31; font-size: 12px; }
+  .item span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  button { background: #25272c; color: inherit; border: 1px solid #454851; border-radius: 4px;
+    padding: 5px 10px; min-height: 32px; font: inherit; font-size: 12px; white-space: nowrap; flex: 0 0 auto; }
+  button:hover { background: #34373e; border-color: #767c89; }
+  button.primary { background: #293b30; border-color: #597b61; }
+  .actions { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .actions:empty { display: none; }
+  #viewer { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #151619; }
+  .viewer-bar { flex: 0 0 auto; padding: 14px 24px; border-bottom: 1px solid var(--line); align-items: center; }
+  .viewer-heading { min-width: 0; }
+  #viewer-title { overflow-wrap: anywhere; }
+  #viewer-status { overflow-wrap: anywhere; font: 11px/1.6 var(--mono); }
+  #viewer-body { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain;
+    padding: 8px clamp(16px, 4vw, 64px) 32px; }
+  .empty-thread { max-width: 36em; margin: 12vh auto; }
+  .empty-thread h3 { font-size: 22px; font-weight: 500; margin: 0 0 10px; }
+  .empty-thread p { margin: 0; color: var(--muted); }
   .msg { margin: 0; padding: 14px 0; border-bottom: 1px solid #262626; }
   .who { font-size: 12px; font-weight: 650; margin-bottom: 6px; }
   .msg-prompt .who { color: #e6c87a; }
@@ -155,7 +181,7 @@ PAGE = """<!doctype html>
     border: 1px solid #2c2c2c; border-radius: 8px; padding: 10px 12px; }
   .thought { color: #8a8a8a; }
   .thought summary, .msg-thought { color: #8a8a8a; }
-  .term { background: #0e0e0e; border: 1px solid #2a2a2a; border-radius: 8px; padding: 8px 10px; }
+  .term { font: 13px/1.6 var(--mono); background: #0e0e0e; border: 1px solid #2a2a2a; border-radius: 8px; padding: 8px 10px; }
   .term-call + .term-call { margin-top: 8px; padding-top: 8px; border-top: 1px solid #242424; }
   .term-cmd { color: #e4e4e4; white-space: pre-wrap; word-break: break-word; }
   .term-prompt { color: #8fd48f; }
@@ -164,39 +190,60 @@ PAGE = """<!doctype html>
   .term-fold summary { cursor: pointer; color: #9a9a9a; }
   .term-err { white-space: pre-wrap; word-break: break-word; color: #f0a0a0; background: #241616;
     border: 1px solid #6e4040; border-radius: 8px; padding: 10px 12px; }
-  #activity { white-space: pre-wrap; max-height: 28vh; overflow: auto; background: #1b1b1b; padding: 10px; margin: 8px 0 0; }
-  details.log { margin-top: 4px; }
+  #activity { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 22vh; overflow: auto;
+    background: #101114; padding: 12px; margin: 0; font: 12px/1.6 var(--mono); }
+  details.log { flex: 0 0 auto; border-top: 1px solid var(--line); }
+  details.log > summary { padding: 12px 16px; font: 12px/1.6 var(--mono); }
   summary { cursor: pointer; }
-  @media (min-width: 860px) {
-    .workspace:has(#viewer:not([hidden])) { flex-direction: row; align-items: stretch; }
-    .workspace:has(#viewer:not([hidden])) #tasks { flex: 0 0 340px; }
-  }
   @media (max-width: 640px) {
-    header { flex-direction: column; align-items: flex-start; }
-    .top { flex-direction: column; }
-    .viewer-bar { flex-direction: row; align-items: center; }
-    .md-code, .term-cmd, .term-out, .term-err { font-size: 12px; }
+    body { height: auto; min-height: 100vh; min-height: 100dvh; }
+    .app-header { padding: 10px 14px; }
+    .health { width: 100%; }
+    .status-bar { padding: 10px 14px; }
+    .workspace { display: flex; flex-direction: column; }
+    #viewer { height: 65vh; height: 65dvh; min-height: 320px; flex: 0 0 auto; }
+    .viewer-bar { padding: 10px 14px; }
+    .sidebar { border-left: 0; border-top: 1px solid var(--line); }
+    #tasks { overflow: visible; }
+    .empty-thread { margin: 6vh auto; }
+    button { min-height: 40px; }
+    .md-code, .term, .term-cmd, .term-out, .term-err { font-size: 12px; }
   }
 </style>
-<header>
-  <div><h1>next-pr</h1><div id="daemon" class="muted">讀取中</div></div>
-  <div id="providers" class="muted"></div>
+<body>
+<header class="app-header">
+  <div class="brand"><h1>next-pr</h1><span class="muted">本機工作台</span></div>
+  <div class="health" aria-live="polite">
+    <span id="daemon" class="muted">協調器讀取中</span>
+    <span id="providers" class="muted">供應商讀取中</span>
+  </div>
 </header>
 <main>
-  <p id="now">讀取中</p>
-  <p id="flash" class="muted"></p>
-  <div class="workspace">
-    <section id="viewer" hidden>
-      <div class="top viewer-bar"><div class="title" id="viewer-title">對話</div>
-        <button onclick="closeTalk()">關閉</button></div>
-      <div id="viewer-body"></div>
-    </section>
-    <div id="tasks"></div>
+  <div class="status-bar">
+    <p id="now" role="status">讀取中</p>
+    <p id="flash" class="muted" role="status"></p>
   </div>
-  <details class="log">
-    <summary>協調器紀錄</summary>
-    <pre id="activity" class="muted"></pre>
-  </details>
+  <div class="workspace">
+    <section id="viewer" aria-labelledby="viewer-title">
+      <div class="top viewer-bar">
+        <div class="viewer-heading"><h2 id="viewer-title">對話</h2>
+          <div id="viewer-status" class="muted">等待選取任務</div></div>
+        <button id="viewer-close" onclick="closeTalk()" hidden>關閉對話</button>
+      </div>
+      <div id="viewer-body" tabindex="0" aria-label="對話紀錄">
+        <div class="empty-thread"><h3>從一段對話開始</h3>
+          <p>在任務清單選取「對話」，查看代理的回覆、思考與工具紀錄。</p></div>
+      </div>
+    </section>
+    <aside class="sidebar" aria-labelledby="tasks-title">
+      <h2 id="tasks-title" class="sidebar-heading">任務</h2>
+      <div id="tasks"></div>
+      <details class="log">
+        <summary>協調器紀錄</summary>
+        <pre id="activity" class="muted"></pre>
+      </details>
+    </aside>
+  </div>
 </main>
 <script>
 const STEPS = [['排隊','queue'],['拆任務','split'],['寫作','work'],['等 CI','ci'],['合併','merge']];
@@ -231,6 +278,7 @@ let openRun = null;
 let openKeys = new Set();
 let talkSignature = '';
 let talkTicket = 0;
+const emptyThread = document.getElementById('viewer-body').innerHTML;
 function latestRun(taskId, role) {
   const matches = state.runs.filter(run => run.task_id === taskId && run.role === role);
   return matches.length ? matches[matches.length - 1] : null;
@@ -378,8 +426,10 @@ function closeTalk() {
   openRun = null;
   openKeys = new Set();
   talkSignature = '';
-  document.getElementById('viewer').hidden = true;
-  document.getElementById('viewer-body').innerHTML = '';
+  document.getElementById('viewer-title').textContent = '對話';
+  document.getElementById('viewer-status').textContent = '等待選取任務';
+  document.getElementById('viewer-close').hidden = true;
+  document.getElementById('viewer-body').innerHTML = emptyThread;
 }
 async function showTalk(id) {
   if (openRun !== id) {
@@ -388,21 +438,27 @@ async function showTalk(id) {
   }
   openRun = id;
   await loadTalk();
+  if (openRun === id && matchMedia('(max-width: 640px)').matches) {
+    document.getElementById('viewer').scrollIntoView({block: 'start'});
+  }
 }
 async function loadTalk() {
   const id = openRun;
   if (!id) return;
   const ticket = ++talkTicket;
-  const viewer = document.getElementById('viewer');
   const log = document.getElementById('viewer-body');
   const response = await fetch('/runs/' + id + '/transcript');
   if (openRun !== id || ticket !== talkTicket) return;
   const body = await response.json();
   if (openRun !== id || ticket !== talkTicket) return;
-  viewer.hidden = false;
+  document.getElementById('viewer-close').hidden = false;
   const run = state.runs.find(item => item.id === id);
-  document.getElementById('viewer-title').textContent = run
-    ? (ROLE[run.role] || run.role) + ' · ' + (run.when || '') : '對話';
+  const task = run && state.tasks.find(item => item.id === run.task_id);
+  document.getElementById('viewer-title').textContent = task ? task.title : '對話';
+  document.getElementById('viewer-status').textContent = run
+    ? [ROLE[run.role] || run.role, run.provider,
+      run.exit_code === null ? '運行中' : run.exit_code === 0 ? '已完成' : '已停止', run.when]
+      .filter(Boolean).join(' · ') : '對話紀錄';
   if (body.blocked) {
     talkSignature = '';
     log.textContent = body.blocked;
@@ -432,7 +488,7 @@ document.getElementById('viewer-body').addEventListener('toggle', event => {
   if (node.open) openKeys.add(node.dataset.key);
   else openKeys.delete(node.dataset.key);
 }, true);
-function taskCard(task) {
+function taskRow(task) {
   const here = STEPS.findIndex(step => step[1] === task.step);
   const steps = STEPS.map((step, index) => {
     let cls = '';
@@ -459,8 +515,8 @@ function taskCard(task) {
     actions += '<button onclick="act(\\'' + task.id + '\\',\\'cancel\\')">取消</button>';
   const badge = task.stage === 'blocked' || task.stage === 'cancelled' ? 'bad'
     : task.stage === 'merged' || task.stage === 'answered' ? 'ok' : 'wait';
-  return '<article class="' + (task.stage === 'blocked' ? 'stop' : '') + '"><div class="top"><div>'
-    + '<div class="title">' + esc(task.title) + '</div><div class="muted">' + pr
+  return '<article class="task-row' + (task.stage === 'blocked' ? ' stop' : '') + '"><div class="top"><div class="task-info">'
+    + '<div class="title">' + esc(task.title) + '</div><div class="muted task-meta">' + pr
     + (pr ? ' · ' : '') + esc(task.id.slice(0, 8)) + '</div></div>'
     + '<div class="badge ' + badge + '">' + esc(task.stage_label) + '</div></div>'
     + '<ol class="steps">' + steps + '</ol>'
@@ -474,6 +530,7 @@ function nowLine(tasks) {
   return live.map(task => task.title + '，' + (task.plain_note || task.stage_label)).join('。') + '。';
 }
 async function refresh() {
+  const previousRun = state.runs.find(item => item.id === openRun);
   state = await (await fetch('/api/state')).json();
   const daemon = document.getElementById('daemon');
   daemon.textContent = state.daemon ? (state.paused ? '協調器已暫停' : '協調器運行中') : '協調器未運行';
@@ -484,14 +541,16 @@ async function refresh() {
     ? quiet.map(item => item.name + ' 未確認').concat(held.map(item => item.name + ' 暫停')).join(' · ')
     : '工具就緒';
   document.getElementById('now').textContent = nowLine(state.tasks);
-  document.getElementById('tasks').innerHTML = state.tasks.map(taskCard).join('') || '<p class="muted">沒有任務</p>';
+  document.getElementById('tasks').innerHTML = state.tasks.map(taskRow).join('') || '<p class="muted">沒有任務</p>';
   document.getElementById('activity').textContent = state.activity || '未有紀錄';
   const live = state.runs.find(item => item.id === openRun);
-  if (live && live.exit_code === null) loadTalk();
+  if (live && (live.exit_code === null || (previousRun && previousRun.exit_code === null))) loadTalk();
 }
 refresh();
 setInterval(refresh, 2000);
 </script>
+</body>
+</html>
 """
 
 

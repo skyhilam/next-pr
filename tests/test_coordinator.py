@@ -559,6 +559,23 @@ class CrashTests(Fixture):
 
 
 class TranscriptTests(Fixture):
+    def test_page_keeps_conversation_primary_and_task_controls_available(self):
+        self.assertIn('<html lang="zh-Hant">', PAGE)
+        self.assertIn('name="viewport" content="width=device-width, initial-scale=1"', PAGE)
+        self.assertIn('<section id="viewer" aria-labelledby="viewer-title">', PAGE)
+        self.assertIn('<aside class="sidebar" aria-labelledby="tasks-title">', PAGE)
+        self.assertLess(PAGE.index('id="viewer"'), PAGE.index('class="sidebar"'))
+        for identifier in ('tasks', 'now', 'flash', 'daemon', 'providers', 'activity', 'viewer-status'):
+            self.assertIn('id="' + identifier + '"', PAGE)
+        self.assertIn('<article class="task-row', PAGE)
+        self.assertIn('grid-template-columns: minmax(0, 1fr) minmax(260px, 30%)', PAGE)
+        self.assertIn('@media (max-width: 640px)', PAGE)
+        self.assertIn('.workspace { display: flex; flex-direction: column; }', PAGE)
+        self.assertNotIn("document.getElementById('viewer').hidden = true", PAGE)
+        self.assertIn("action === 'cancel' && !confirm(", PAGE)
+        for label in ('暫停', '繼續', '取消', '協調器紀錄', '工具就緒'):
+            self.assertIn(label, PAGE)
+
     def test_transcript_shows_speech_tools_and_refuses_other_runs(self):
         run = self.home / 'runs' / ('ab' * 16)
         run.mkdir(parents=True)
