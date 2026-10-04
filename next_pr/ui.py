@@ -1,7 +1,11 @@
-"""Local page for task state, daemon health, and run logs. Loopback only."""
+"""Local page for task state, daemon health, run logs, and a CodexBar overview. Loopback only."""
 import json
+import os
 import re
+import shutil
 import sqlite3
+import subprocess
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -41,6 +45,11 @@ except ImportError:
         return found
 
 RUN_ID = re.compile(r'[0-9a-f]{16,64}')
+_CODEXBAR_FALLBACK = '/Applications/CodexBar.app/Contents/Helpers/CodexBarCLI'
+_OVERVIEW_TTL_SECONDS = 30
+_OVERVIEW_TIMEOUT_SECONDS = 25
+_overview_lock = threading.Lock()
+_overview_cache = {'payload': None, 'monotonic': 0.0}
 STAGE_LABELS = {
     'queued': '排隊', 'handling': '拆任務', 'clarifying': '等你答', 'opening': '開 PR',
     'working': '寫作中', 'reading': '讀取中', 'coding': '寫作中', 'fixing': '修正中',
@@ -120,6 +129,26 @@ PAGE = """<!doctype html>
   #flash:empty { display: none; }
   .muted { color: var(--muted); }
   .ok { color: #9bd3aa; } .bad { color: #f0a0a0; } .wait { color: #e6c87a; }
+  #overview { flex: 0 0 auto; min-width: 0; max-height: 34vh; overflow: auto;
+    padding: 12px 20px; border-bottom: 1px solid var(--line); background: #1b1c20; }
+  .overview-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+  .overview-heading span, #overview-content { font-size: 12px; }
+  #overview-content { overflow-wrap: anywhere; }
+  #overview-content > p { margin: 8px 0 0; }
+  .overview-provider { display: grid; grid-template-columns: minmax(0, 120px) minmax(0, 1fr);
+    gap: 8px 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .overview-provider:last-child { border-bottom: 0; padding-bottom: 0; }
+  .overview-provider h3 { font-size: 13px; margin: 0; }
+  .overview-data, .overview-account { min-width: 0; }
+  .overview-windows { display: flex; flex-wrap: wrap; gap: 10px 20px; }
+  .overview-window { flex: 1 1 160px; min-width: 0; }
+  .overview-window-label { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 8px; }
+  .overview-track { height: 6px; margin: 5px 0; border-radius: 3px; background: #393b41; overflow: hidden; }
+  .overview-fill { display: block; height: 100%; background: #9ec1ff; }
+  .overview-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; }
+  .overview-pace, .overview-error { margin: 6px 0 0; }
+  .overview-account { margin-top: 10px; padding: 8px 0 0 12px; border-left: 2px solid var(--line); }
+  .overview-account-heading { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-bottom: 6px; }
   .workspace { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 30%); }
   .sidebar { min-width: 0; min-height: 0; display: flex; flex-direction: column;
     background: #1b1c20; border-left: 1px solid var(--line); }
@@ -200,6 +229,8 @@ PAGE = """<!doctype html>
     .app-header { padding: 10px 14px; }
     .health { width: 100%; }
     .status-bar { padding: 10px 14px; }
+    #overview { max-height: none; overflow: visible; padding: 12px 14px; }
+    .overview-provider { grid-template-columns: minmax(0, 1fr); }
     .workspace { display: flex; flex-direction: column; }
     #viewer { height: 65vh; height: 65dvh; min-height: 320px; flex: 0 0 auto; }
     .viewer-bar { padding: 10px 14px; }
@@ -210,7 +241,7 @@ PAGE = """<!doctype html>
     .md-code, .term, .term-cmd, .term-out, .term-err { font-size: 12px; }
   }
 </style>
-<body>
+<body onload="refreshOverview()">
 <header class="app-header">
   <div class="brand"><h1>next-pr</h1><span class="muted">本機工作台</span></div>
   <div class="health" aria-live="polite">
@@ -223,6 +254,11 @@ PAGE = """<!doctype html>
     <p id="now" role="status">讀取中</p>
     <p id="flash" class="muted" role="status"></p>
   </div>
+  <section id="overview" aria-labelledby="overview-title" tabindex="0">
+    <div class="overview-heading"><h2 id="overview-title">CodexBar Overview</h2>
+      <span class="muted">本機用量總覽 · 每 30 秒更新</span></div>
+    <div id="overview-content" aria-live="polite"><p class="muted">讀取總覽中…</p></div>
+  </section>
   <div class="workspace">
     <section id="viewer" aria-labelledby="viewer-title">
       <div class="top viewer-bar">
@@ -272,6 +308,75 @@ async function act(id, action) {
 }
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+function overviewWindow(window, showUsed) {
+  const labels = {Session: '工作階段', Weekly: '每週', session: '工作階段', weekly: '每週'};
+  const name = window.label || window.kind || '用量';
+  const label = Object.hasOwn(labels, name) ? labels[name] : name;
+  const percent = Number.isFinite(window.percent) ? Math.max(0, Math.min(100, window.percent)) : null;
+  const value = percent === null ? '用量未知' : (showUsed ? '已用 ' : '剩餘 ') + percent + '%';
+  let reset = '';
+  if (window.resetAt) {
+    const date = new Date(window.resetAt);
+    reset = '<div class="muted">重設：' + esc(Number.isNaN(date.getTime()) ? window.resetAt
+      : date.toLocaleString('zh-TW', {month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit'})) + '</div>';
+  }
+  return '<div class="overview-window"><div class="overview-window-label"><span>' + esc(label)
+    + '</span><span>' + esc(value) + '</span></div><div class="overview-track" role="meter" aria-label="'
+    + esc(label + ' · ' + value) + '" aria-valuemin="0" aria-valuemax="100"'
+    + (percent === null ? '' : ' aria-valuenow="' + esc(percent) + '"') + '>'
+    + (percent === null ? '' : '<span class="overview-fill" style="width:' + esc(percent) + '%"></span>')
+    + '</div>' + reset + '</div>';
+}
+function overviewDetails(row, showUsed) {
+  if (row.error) {
+    const error = typeof row.error === 'string' ? row.error
+      : row.error.message || row.error.code || row.error.kind || '無法讀取用量';
+    return '<p class="overview-error bad">錯誤：' + esc(error) + '</p>';
+  }
+  const windows = (row.windows || []).filter(window => window.idle !== true);
+  const meta = [];
+  if (row.plan) meta.push('方案：' + row.plan);
+  if (Number.isFinite(row.credits?.remaining)) {
+    const unit = row.credits.unit === 'credits' ? '點數' : row.credits.unit || '點數';
+    meta.push('剩餘額度：' + row.credits.remaining + ' ' + unit);
+  }
+  for (const [key, label] of [['todayUSD', '今日費用'], ['last30DaysUSD', '近 30 日費用']]) {
+    if (Number.isFinite(row.cost?.[key])) meta.push(label + '：US$' + row.cost[key].toFixed(2));
+  }
+  const pace = Object.values(row.pace || {}).filter(summary => typeof summary === 'string' && summary);
+  return (windows.length ? '<div class="overview-windows">'
+    + windows.map(window => overviewWindow(window, showUsed)).join('') + '</div>' : '')
+    + (meta.length ? '<div class="overview-meta muted">'
+      + meta.map(text => '<span>' + esc(text) + '</span>').join('') + '</div>' : '')
+    + pace.map(summary => '<p class="overview-pace muted">用量步調：' + esc(summary) + '</p>').join('');
+}
+function renderOverview(data) {
+  if (!data || data.ready !== true || !Array.isArray(data.providers)) {
+    return '<p class="muted">Overview 未就緒：' + esc(data?.reason || '無法讀取本機總覽') + '</p>';
+  }
+  const showUsed = data.host?.usageBarsShowUsed === true;
+  return data.providers.filter(row => row.enabled !== false).map(row => {
+    const accounts = (row.accounts || []).map(account => '<div class="overview-account">'
+      + '<div class="overview-account-heading"><strong>' + esc(account.label || '未命名帳戶') + '</strong>'
+      + (account.active === true ? '<span class="ok">使用中</span>' : '') + '</div>'
+      + overviewDetails(account, showUsed) + '</div>').join('');
+    return '<article class="overview-provider"><h3>' + esc(row.name || row.id || '未命名供應商')
+      + '</h3><div class="overview-data">' + overviewDetails(row, showUsed) + accounts + '</div></article>';
+  }).join('') || '<p class="muted">尚未啟用任何供應商</p>';
+}
+async function refreshOverview() {
+  const content = document.getElementById('overview-content');
+  try {
+    const response = await fetch('/api/overview', {signal: AbortSignal.timeout(35000)});
+    if (!response.ok) throw new Error('本機總覽暫時無法讀取');
+    content.innerHTML = renderOverview(await response.json());
+  } catch (error) {
+    content.innerHTML = renderOverview({ready: false, reason:
+      error.name === 'TimeoutError' || error.name === 'AbortError' ? '讀取逾時' : '本機總覽暫時無法讀取'});
+  } finally {
+    setTimeout(refreshOverview, 30000);
+  }
+}
 let state = {runs: []};
 let openRun = null;
 let openKeys = new Set();
@@ -838,6 +943,214 @@ def act(store, task_id, action, attempts=20):
     raise Blocked('協調器忙碌，請再按一次')
 
 
+def _codexbar_argv():
+    """PATH `codexbar` first, then the app helper. One-shot dashboard only."""
+    binary = shutil.which('codexbar')
+    if not binary:
+        fallback = Path(_CODEXBAR_FALLBACK)
+        if fallback.is_file() and os.access(fallback, os.X_OK):
+            binary = str(fallback)
+    if not binary:
+        return None
+    return [binary, 'dashboard', '--timeout', str(_OVERVIEW_TIMEOUT_SECONDS)]
+
+
+def _number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _display_percent(window, show_used):
+    """`usageBarsShowUsed` true is usedPercent. False or absent is remainingPercent."""
+    key = 'usedPercent' if show_used else 'remainingPercent'
+    return _number(window.get(key))
+
+
+def _windows(raw, show_used):
+    if not isinstance(raw, list):
+        return []
+    rows = []
+    for item in raw:
+        if not isinstance(item, dict) or item.get('idle') is True:
+            continue
+        row = {}
+        for key in ('kind', 'label'):
+            if isinstance(item.get(key), str):
+                row[key] = item[key]
+        percent = _display_percent(item, show_used)
+        if percent is not None:
+            row['percent'] = percent
+        if isinstance(item.get('resetAt'), str) and item['resetAt']:
+            row['resetAt'] = item['resetAt']
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _pace_summaries(raw):
+    if not isinstance(raw, dict):
+        return None
+    summaries = {}
+    for key, item in raw.items():
+        if not isinstance(key, str):
+            continue
+        summary = item.get('summary') if isinstance(item, dict) else item
+        if isinstance(summary, str) and summary:
+            summaries[key] = summary
+    return summaries or None
+
+
+def _credits(raw):
+    if not isinstance(raw, dict):
+        return None
+    remaining = _number(raw.get('remaining'))
+    if remaining is None:
+        return None
+    credits = {'remaining': remaining}
+    if isinstance(raw.get('unit'), str) and raw['unit']:
+        credits['unit'] = raw['unit']
+    return credits
+
+
+def _cost(raw):
+    if not isinstance(raw, dict):
+        return None
+    cost = {}
+    for key in ('todayUSD', 'last30DaysUSD'):
+        number = _number(raw.get(key))
+        if number is not None:
+            cost[key] = number
+    return cost or None
+
+
+def _error(raw):
+    if isinstance(raw, str):
+        return raw or None
+    if isinstance(raw, dict):
+        kept = {key: raw[key] for key in ('code', 'kind', 'message') if isinstance(raw.get(key), str)}
+        return kept or None
+    return None
+
+
+def _plan(raw):
+    if isinstance(raw, dict) and isinstance(raw.get('plan'), str) and raw['plan']:
+        return raw['plan']
+    return None
+
+
+def _accounts(raw, show_used):
+    if not isinstance(raw, list):
+        return []
+    rows = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        account = {
+            'label': item.get('label') if isinstance(item.get('label'), str) else '',
+            'active': item.get('active') is True,
+        }
+        plan = _plan(item.get('identity'))
+        if plan:
+            account['plan'] = plan
+        windows = _windows(item.get('windows'), show_used)
+        if windows:
+            account['windows'] = windows
+        pace = _pace_summaries(item.get('pace'))
+        if pace:
+            account['pace'] = pace
+        error = _error(item.get('error'))
+        if error:
+            account['error'] = error
+        rows.append(account)
+    return rows
+
+
+def _provider_row(item, show_used):
+    row = {
+        'id': item.get('id') if isinstance(item.get('id'), str) else '',
+        'name': item.get('name') if isinstance(item.get('name'), str) else '',
+        'windows': _windows(item.get('windows'), show_used),
+        'error': _error(item.get('error')),
+    }
+    plan = _plan(item.get('identity'))
+    if plan:
+        row['plan'] = plan
+    credits = _credits(item.get('credits'))
+    if credits:
+        row['credits'] = credits
+    cost = _cost(item.get('cost'))
+    if cost:
+        row['cost'] = cost
+    pace = _pace_summaries(item.get('pace'))
+    if pace:
+        row['pace'] = pace
+    if 'accounts' in item:
+        row['accounts'] = _accounts(item.get('accounts'), show_used)
+    return row
+
+
+def _overview_not_ready(reason):
+    return {'ready': False, 'reason': reason, 'host': {'usageBarsShowUsed': False}, 'providers': []}
+
+
+def _reduce_overview(payload):
+    if not isinstance(payload, dict) or payload.get('schemaVersion') != 1:
+        return _overview_not_ready('CodexBar 資料版本不符')
+    host = payload.get('host') if isinstance(payload.get('host'), dict) else {}
+    show_used = host.get('usageBarsShowUsed') is True
+    providers = []
+    raw = payload.get('providers')
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict) and item.get('enabled') is True:
+                providers.append(_provider_row(item, show_used))
+    return {'ready': True, 'host': {'usageBarsShowUsed': show_used}, 'providers': providers}
+
+
+def _load_dashboard():
+    argv = _codexbar_argv()
+    if not argv:
+        return _overview_not_ready('找不到 CodexBar')
+    try:
+        result = subprocess.run(
+            argv, stdin=subprocess.DEVNULL, capture_output=True,
+            timeout=_OVERVIEW_TIMEOUT_SECONDS + 5)
+    except subprocess.TimeoutExpired:
+        return _overview_not_ready('CodexBar 逾時')
+    except OSError:
+        return _overview_not_ready('找不到 CodexBar')
+    if result.returncode != 0:
+        return _overview_not_ready('CodexBar 無法讀取')
+    try:
+        payload = json.loads(result.stdout)
+    except (UnicodeError, ValueError):
+        return _overview_not_ready('CodexBar 回應無效')
+    return _reduce_overview(payload)
+
+
+def _clear_overview_cache():
+    with _overview_lock:
+        _overview_cache['payload'] = None
+        _overview_cache['monotonic'] = 0.0
+
+
+def overview():
+    """Cached `codexbar dashboard` read. A miss, timeout, or bad payload stays not-ready."""
+    now_at = time.monotonic()
+    with _overview_lock:
+        cached = _overview_cache['payload']
+        if cached is not None and now_at - _overview_cache['monotonic'] < _OVERVIEW_TTL_SECONDS:
+            return cached
+        try:
+            payload = _load_dashboard()
+        except Exception:
+            payload = _overview_not_ready('CodexBar 未就緒')
+        _overview_cache['payload'] = payload
+        _overview_cache['monotonic'] = time.monotonic()
+        return payload
+
+
 class Handler(BaseHTTPRequestHandler):
     home = None
 
@@ -886,6 +1199,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         elif parsed.path == '/api/state':
             self.finish_json(snapshot)
+        elif parsed.path == '/api/overview':
+            self.send_json(overview())
         elif parsed.path.startswith('/runs/'):
             parts = parsed.path.split('/')
             if len(parts) != 4 or not parts[2] or parts[3] not in {'transcript', 'stdout', 'stderr'}:
