@@ -17,7 +17,7 @@ from next_pr.cli import activation_gate, main, recover
 from next_pr.common import Blocked, atomic_json, lock, lock_held, now, read_json
 from next_pr.state import Store, initial_config, overlaps, repo_config
 from next_pr import ui
-from next_pr.ui import Handler, PAGE, overview, snapshot, transcript
+from next_pr.ui import Handler, PAGE, overview, snapshot, task_transcript, time_label, transcript
 
 SHA = 'a' * 40
 OTHER = 'b' * 40
@@ -674,6 +674,28 @@ class DashboardHTTPTests(Fixture):
             with self.subTest(path=path):
                 self.assertEqual(self.request(path), (404, {'blocked': 'not found'}))
 
+    def test_task_transcript_route_returns_one_task_and_rejects_illegal_ids(self):
+        first = self.task()
+        second = self.task(scope='web', key='two')
+        early, other = 'ab' * 16, 'cd' * 16
+        _write_run(self, first, early, 100, 'code', 'grok', 'alpha prompt',
+                   json.dumps({'type': 'text', 'data': 'alpha reply'}))
+        _write_run(self, second, other, 200, 'code', 'codex', 'beta secret',
+                   json.dumps({'type': 'text', 'data': 'beta reply'}))
+        status, body = self.request(f'/tasks/{first["id"]}/transcript')
+        self.assertEqual(status, 200)
+        self.assertEqual(body, task_transcript(self.store, first['id']))
+        self.assertEqual([item['id'] for item in body['runs']], [early])
+        self.assertNotIn('beta secret', json.dumps(body, ensure_ascii=False))
+        self.assertEqual(self.request('/tasks/' + ('z' * 16) + '/transcript'),
+                         (400, {'blocked': 'unknown task'}))
+        self.assertEqual(self.request('/tasks/' + ('ab' * 8) + '/transcript'),
+                         (400, {'blocked': 'unknown task'}))
+        for path in ('/tasks/', '/tasks//transcript', f'/tasks/{first["id"]}',
+                     f'/tasks/{first["id"]}/pause', f'/tasks/{first["id"]}/transcript/extra'):
+            with self.subTest(path=path):
+                self.assertEqual(self.request(path), (404, {'blocked': 'not found'}))
+
 
 class TranscriptTests(Fixture):
     def test_page_keeps_conversation_primary_and_task_controls_available(self):
@@ -805,6 +827,152 @@ class TranscriptTests(Fixture):
         self.assertNotIn('Y' * 2500, trailed['text'])
         self.assertIn('rg label', trailed['text'])
         self.assertEqual(trailed['calls'][0]['output'], trailed['output'])
+
+
+def _write_run(test, task, run_id, created_at, role, provider, prompt, stdout='', stderr=None):
+    directory = test.home / 'runs' / run_id
+    directory.mkdir(parents=True)
+    (directory / 'prompt.txt').write_text(prompt)
+    (directory / 'manifest.json').write_text(json.dumps({'provider': provider, 'role': role}))
+    if stdout:
+        (directory / 'stdout.log').write_text(stdout)
+    if stderr is not None:
+        (directory / 'stderr.log').write_text(stderr)
+    test.store.save_run({'id': run_id, 'task_id': task['id'], 'role': role, 'provider': provider,
+                          'created_at': created_at, 'directory': str(directory)})
+
+
+class ProjectTranscriptTests(Fixture):
+    def test_projects_list_every_registered_repo_and_unopened_tasks(self):
+        alone = snapshot(self.store)
+        self.assertEqual([item['repo'] for item in alone['projects']], [REPO])
+        self.assertEqual(alone['projects'][0]['tasks'], [])
+        self.assertEqual(alone['tasks'], [])
+
+        self.cfg['repos']['acme/empty'] = {
+            'path': str(self.home / 'empty'), 'base': 'main', 'enabled': False,
+            'auto_merge': False, 'validation': [],
+        }
+        atomic_json(self.home / 'config.json', self.cfg)
+        opened = self.task()
+        draft = self.store.submit(REPO, 'Draft title', 'No pull request yet', 'draft', ['docs'], [])
+        draft.update(stage='queued', pr_number='')
+        self.store.save(draft)
+        outsider = self.store.submit('other/unlisted', 'Outside', 'Still listed', 'out', ['api'], [])
+        outsider.update(stage='opening', pr_number=None)
+        self.store.save(outsider)
+
+        page = snapshot(self.store)
+        self.assertEqual(set(page), {
+            'daemon', 'paused', 'providers', 'tasks', 'projects', 'runs', 'activity'})
+        self.assertIsInstance(page['daemon'], bool)
+        self.assertIs(page['paused'], False)
+        self.assertEqual(page['runs'], [])
+        self.assertEqual(page['activity'], '')
+        self.assertEqual([item['name'] for item in page['providers']],
+                         ['codex', 'claude', 'grok', 'cursor'])
+        self.assertEqual([item['repo'] for item in page['projects']],
+                         [REPO, 'acme/empty', 'other/unlisted'])
+        self.assertEqual([item['id'] for item in page['projects'][0]['tasks']],
+                         [opened['id'], draft['id']])
+        self.assertEqual(page['projects'][1]['tasks'], [])
+        self.assertEqual([item['id'] for item in page['projects'][2]['tasks']], [outsider['id']])
+        draft_row = page['projects'][0]['tasks'][1]
+        self.assertEqual(draft_row['pr_number'], '')
+        self.assertFalse(draft_row['pr_url'])
+        self.assertIsNone(page['projects'][2]['tasks'][0]['pr_number'])
+        self.assertEqual(page['projects'][0]['tasks'][0]['pr_number'], 1)
+        self.assertEqual(page['projects'][0]['tasks'][0]['pr_url'], f'https://github.com/{REPO}/pull/1')
+        flat = {item['id']: item for item in page['tasks']}
+        self.assertEqual(list(flat), [opened['id'], draft['id'], outsider['id']])
+        for project in page['projects']:
+            for item in project['tasks']:
+                self.assertIs(item, flat[item['id']])
+
+    def test_task_transcript_is_one_task_in_time_order_with_split_tool_io(self):
+        first = self.task()
+        second = self.task(scope='web', key='two')
+        early, late, other = 'ab' * 16, 'cd' * 16, 'ef' * 16
+        tool_log = '\n'.join([
+            json.dumps({'type': 'thought', 'data': '先看檔案'}),
+            json.dumps({'type': 'tool_call', 'toolCallId': '1', 'toolName': 'shell',
+                        'rawInput': {'command': 'echo alpha'}}),
+            json.dumps({'type': 'tool_call_update', 'toolCallId': '1', 'status': 'completed',
+                        'rawOutput': 'alpha-out'}),
+            json.dumps({'type': 'tool_call', 'toolCallId': '2', 'toolName': 'read_file',
+                        'rawInput': {'target_file': 'left.kt'}}),
+            json.dumps({'type': 'tool_call_update', 'toolCallId': '2', 'status': 'completed',
+                        'content': [{'type': 'content', 'content': 'class Left'}]}),
+            json.dumps({'type': 'text', 'data': '回覆本文'}),
+            json.dumps({'type': 'error', 'message': 'model broke'}),
+        ]) + '\n'
+        single_tool = '\n'.join([
+            json.dumps({'type': 'tool_call', 'toolCallId': 'b', 'toolName': 'grep',
+                        'rawInput': {'command': 'rg beta'}}),
+            json.dumps({'type': 'tool_call_update', 'toolCallId': 'b', 'status': 'completed',
+                        'rawOutput': 'beta-out'}),
+            json.dumps({'type': 'text', 'data': 'beta reply'}),
+        ]) + '\n'
+        _write_run(self, first, early, 100, 'code', 'grok', 'alpha prompt', tool_log, 'alpha stderr')
+        _write_run(self, second, other, 200, 'code', 'codex', 'beta secret', single_tool)
+        _write_run(self, first, late, 300, 'review', 'claude', 'late prompt',
+                   json.dumps({'type': 'text', 'data': 'late reply'}))
+
+        own = transcript(self.home, other)
+        single = next(item for item in own['messages'] if item['kind'] == 'tool')
+        self.assertEqual(single['tool'], 'grep')
+        self.assertEqual(single['command'], 'rg beta')
+        self.assertEqual(single['output'], 'beta-out')
+        self.assertEqual(single['calls'], [{'tool': 'grep', 'command': 'rg beta', 'output': 'beta-out'}])
+        self.assertIn('rg beta', single['text'])
+        self.assertIn('beta-out', single['text'])
+
+        body = task_transcript(self.store, first['id'])
+        self.assertEqual([item['id'] for item in body['runs']], [early, late])
+        self.assertEqual(body['runs'][0]['role'], 'code')
+        self.assertEqual(body['runs'][0]['provider'], 'grok')
+        self.assertEqual(body['runs'][0]['when'], time_label(100))
+        self.assertEqual(body['runs'][1]['role'], 'review')
+        self.assertEqual(body['runs'][1]['provider'], 'claude')
+        self.assertEqual(body['runs'][1]['when'], time_label(300))
+        self.assertEqual([item['kind'] for item in body['messages']],
+                         ['prompt', 'thought', 'tool', 'say', 'error', 'error', 'prompt', 'say'])
+        self.assertEqual([item['run_id'] for item in body['messages']], [early] * 6 + [late] * 2)
+        early_when = time_label(100)
+        for item in body['messages']:
+            if item['run_id'] == early:
+                self.assertEqual((item['role'], item['provider'], item['when']), ('code', 'grok', early_when))
+            else:
+                self.assertEqual((item['role'], item['provider'], item['when']),
+                                 ('review', 'claude', time_label(300)))
+        texts = [item['text'] for item in body['messages']]
+        self.assertEqual(texts[0], 'alpha prompt')
+        self.assertEqual(texts[1], '先看檔案')
+        self.assertEqual(texts[3], '回覆本文')
+        self.assertEqual(texts[4], 'model broke')
+        self.assertEqual(texts[5], 'alpha stderr')
+        self.assertEqual(texts[6], 'late prompt')
+        self.assertEqual(texts[7], 'late reply')
+        self.assertEqual(body['messages'][4]['source'], 'model')
+        self.assertEqual(body['messages'][4]['title'], '錯誤')
+        self.assertEqual(body['messages'][5]['source'], 'stderr')
+        self.assertEqual(body['messages'][5]['title'], 'stderr')
+        grouped = body['messages'][2]
+        self.assertEqual([item['tool'] for item in grouped['calls']], ['shell', 'read_file'])
+        self.assertEqual([item['command'] for item in grouped['calls']], ['echo alpha', 'left.kt'])
+        self.assertEqual([item['output'] for item in grouped['calls']], ['alpha-out', 'class Left'])
+        self.assertIn('echo alpha', grouped['text'])
+        self.assertIn('alpha-out', grouped['text'])
+        self.assertIn('left.kt', grouped['text'])
+        self.assertIn('class Left', grouped['text'])
+        rendered = json.dumps(body, ensure_ascii=False)
+        self.assertNotIn('beta secret', rendered)
+        self.assertNotIn('beta reply', rendered)
+        self.assertNotIn('rg beta', rendered)
+        for bad in ('../config', 'not-a-task', 'z' * 16, 'ab' * 8):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(Blocked, 'unknown task'):
+                    task_transcript(self.store, bad)
 
 
 class OverviewTests(Fixture):
