@@ -129,6 +129,26 @@ PAGE = """<!doctype html>
   #flash:empty { display: none; }
   .muted { color: var(--muted); }
   .ok { color: #9bd3aa; } .bad { color: #f0a0a0; } .wait { color: #e6c87a; }
+  #overview { flex: 0 0 auto; min-width: 0; max-height: 34vh; overflow: auto;
+    padding: 12px 20px; border-bottom: 1px solid var(--line); background: #1b1c20; }
+  .overview-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+  .overview-heading span, #overview-content { font-size: 12px; }
+  #overview-content { overflow-wrap: anywhere; }
+  #overview-content > p { margin: 8px 0 0; }
+  .overview-provider { display: grid; grid-template-columns: minmax(0, 120px) minmax(0, 1fr);
+    gap: 8px 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .overview-provider:last-child { border-bottom: 0; padding-bottom: 0; }
+  .overview-provider h3 { font-size: 13px; margin: 0; }
+  .overview-data, .overview-account { min-width: 0; }
+  .overview-windows { display: flex; flex-wrap: wrap; gap: 10px 20px; }
+  .overview-window { flex: 1 1 160px; min-width: 0; }
+  .overview-window-label { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 8px; }
+  .overview-track { height: 6px; margin: 5px 0; border-radius: 3px; background: #393b41; overflow: hidden; }
+  .overview-fill { display: block; height: 100%; background: #9ec1ff; }
+  .overview-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; }
+  .overview-pace, .overview-error { margin: 6px 0 0; }
+  .overview-account { margin-top: 10px; padding: 8px 0 0 12px; border-left: 2px solid var(--line); }
+  .overview-account-heading { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-bottom: 6px; }
   .workspace { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 30%); }
   .sidebar { min-width: 0; min-height: 0; display: flex; flex-direction: column;
     background: #1b1c20; border-left: 1px solid var(--line); }
@@ -209,6 +229,8 @@ PAGE = """<!doctype html>
     .app-header { padding: 10px 14px; }
     .health { width: 100%; }
     .status-bar { padding: 10px 14px; }
+    #overview { max-height: none; overflow: visible; padding: 12px 14px; }
+    .overview-provider { grid-template-columns: minmax(0, 1fr); }
     .workspace { display: flex; flex-direction: column; }
     #viewer { height: 65vh; height: 65dvh; min-height: 320px; flex: 0 0 auto; }
     .viewer-bar { padding: 10px 14px; }
@@ -219,7 +241,7 @@ PAGE = """<!doctype html>
     .md-code, .term, .term-cmd, .term-out, .term-err { font-size: 12px; }
   }
 </style>
-<body>
+<body onload="refreshOverview()">
 <header class="app-header">
   <div class="brand"><h1>next-pr</h1><span class="muted">本機工作台</span></div>
   <div class="health" aria-live="polite">
@@ -232,6 +254,11 @@ PAGE = """<!doctype html>
     <p id="now" role="status">讀取中</p>
     <p id="flash" class="muted" role="status"></p>
   </div>
+  <section id="overview" aria-labelledby="overview-title" tabindex="0">
+    <div class="overview-heading"><h2 id="overview-title">CodexBar Overview</h2>
+      <span class="muted">本機用量總覽 · 每 30 秒更新</span></div>
+    <div id="overview-content" aria-live="polite"><p class="muted">讀取總覽中…</p></div>
+  </section>
   <div class="workspace">
     <section id="viewer" aria-labelledby="viewer-title">
       <div class="top viewer-bar">
@@ -281,6 +308,75 @@ async function act(id, action) {
 }
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+function overviewWindow(window, showUsed) {
+  const labels = {Session: '工作階段', Weekly: '每週', session: '工作階段', weekly: '每週'};
+  const name = window.label || window.kind || '用量';
+  const label = Object.hasOwn(labels, name) ? labels[name] : name;
+  const percent = Number.isFinite(window.percent) ? Math.max(0, Math.min(100, window.percent)) : null;
+  const value = percent === null ? '用量未知' : (showUsed ? '已用 ' : '剩餘 ') + percent + '%';
+  let reset = '';
+  if (window.resetAt) {
+    const date = new Date(window.resetAt);
+    reset = '<div class="muted">重設：' + esc(Number.isNaN(date.getTime()) ? window.resetAt
+      : date.toLocaleString('zh-TW', {month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit'})) + '</div>';
+  }
+  return '<div class="overview-window"><div class="overview-window-label"><span>' + esc(label)
+    + '</span><span>' + esc(value) + '</span></div><div class="overview-track" role="meter" aria-label="'
+    + esc(label + ' · ' + value) + '" aria-valuemin="0" aria-valuemax="100"'
+    + (percent === null ? '' : ' aria-valuenow="' + esc(percent) + '"') + '>'
+    + (percent === null ? '' : '<span class="overview-fill" style="width:' + esc(percent) + '%"></span>')
+    + '</div>' + reset + '</div>';
+}
+function overviewDetails(row, showUsed) {
+  if (row.error) {
+    const error = typeof row.error === 'string' ? row.error
+      : row.error.message || row.error.code || row.error.kind || '無法讀取用量';
+    return '<p class="overview-error bad">錯誤：' + esc(error) + '</p>';
+  }
+  const windows = (row.windows || []).filter(window => window.idle !== true);
+  const meta = [];
+  if (row.plan) meta.push('方案：' + row.plan);
+  if (Number.isFinite(row.credits?.remaining)) {
+    const unit = row.credits.unit === 'credits' ? '點數' : row.credits.unit || '點數';
+    meta.push('剩餘額度：' + row.credits.remaining + ' ' + unit);
+  }
+  for (const [key, label] of [['todayUSD', '今日費用'], ['last30DaysUSD', '近 30 日費用']]) {
+    if (Number.isFinite(row.cost?.[key])) meta.push(label + '：US$' + row.cost[key].toFixed(2));
+  }
+  const pace = Object.values(row.pace || {}).filter(summary => typeof summary === 'string' && summary);
+  return (windows.length ? '<div class="overview-windows">'
+    + windows.map(window => overviewWindow(window, showUsed)).join('') + '</div>' : '')
+    + (meta.length ? '<div class="overview-meta muted">'
+      + meta.map(text => '<span>' + esc(text) + '</span>').join('') + '</div>' : '')
+    + pace.map(summary => '<p class="overview-pace muted">用量步調：' + esc(summary) + '</p>').join('');
+}
+function renderOverview(data) {
+  if (!data || data.ready !== true || !Array.isArray(data.providers)) {
+    return '<p class="muted">Overview 未就緒：' + esc(data?.reason || '無法讀取本機總覽') + '</p>';
+  }
+  const showUsed = data.host?.usageBarsShowUsed === true;
+  return data.providers.filter(row => row.enabled !== false).map(row => {
+    const accounts = (row.accounts || []).map(account => '<div class="overview-account">'
+      + '<div class="overview-account-heading"><strong>' + esc(account.label || '未命名帳戶') + '</strong>'
+      + (account.active === true ? '<span class="ok">使用中</span>' : '') + '</div>'
+      + overviewDetails(account, showUsed) + '</div>').join('');
+    return '<article class="overview-provider"><h3>' + esc(row.name || row.id || '未命名供應商')
+      + '</h3><div class="overview-data">' + overviewDetails(row, showUsed) + accounts + '</div></article>';
+  }).join('') || '<p class="muted">尚未啟用任何供應商</p>';
+}
+async function refreshOverview() {
+  const content = document.getElementById('overview-content');
+  try {
+    const response = await fetch('/api/overview', {signal: AbortSignal.timeout(35000)});
+    if (!response.ok) throw new Error('本機總覽暫時無法讀取');
+    content.innerHTML = renderOverview(await response.json());
+  } catch (error) {
+    content.innerHTML = renderOverview({ready: false, reason:
+      error.name === 'TimeoutError' || error.name === 'AbortError' ? '讀取逾時' : '本機總覽暫時無法讀取'});
+  } finally {
+    setTimeout(refreshOverview, 30000);
+  }
+}
 let state = {runs: []};
 let openRun = null;
 let openKeys = new Set();
