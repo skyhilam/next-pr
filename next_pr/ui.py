@@ -95,17 +95,25 @@ PAGE = """<!doctype html>
 <title>next-pr</title>
 <style>
   :root { color-scheme: dark; }
-  body { margin: 0; background: #121212; color: #ececec; font: 16px/1.45 ui-sans-serif, sans-serif; }
-  header, main { padding: 16px 20px; }
-  main { max-width: 760px; margin: 0 auto; }
-  header { display: flex; justify-content: space-between; gap: 16px; align-items: baseline;
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+    background: #121212; color: #ececec;
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "PingFang TC", "Noto Sans TC", sans-serif; }
+  header, main { padding: 12px 16px; }
+  main { flex: 1 1 auto; min-height: 0; width: 100%; max-width: 1120px; margin: 0 auto;
+    display: flex; flex-direction: column; gap: 10px; }
+  header { flex: 0 0 auto; display: flex; justify-content: space-between; gap: 16px; align-items: baseline;
     border-bottom: 1px solid #2c2c2c; }
   h1 { font-size: 18px; margin: 0; font-weight: 600; }
-  #now { font-size: 18px; margin: 4px 0 14px; }
+  #now { font-size: 16px; margin: 0; }
+  #flash { margin: 0; }
   .muted { color: #9a9a9a; }
   .ok { color: #8fd48f; } .bad { color: #f0a0a0; } .wait { color: #e6c87a; }
-  article { background: #1b1b1b; border: 1px solid #333; border-radius: 10px; padding: 14px 16px; margin: 0 0 12px; }
-  article.stop { border-color: #6e4040; }
+  .workspace { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
+  #tasks { flex: 1 1 auto; min-height: 0; overflow: auto; }
+  #tasks article { background: #1b1b1b; border: 1px solid #333; border-radius: 10px; padding: 14px 16px; margin: 0 0 12px; }
+  #tasks article.stop { border-color: #6e4040; }
   .top { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
   .title { font-size: 17px; }
   .badge { border: 1px solid #555; border-radius: 999px; padding: 2px 10px; font-size: 13px; white-space: nowrap; }
@@ -120,16 +128,54 @@ PAGE = """<!doctype html>
   button { background: #2a2a2a; color: inherit; border: 1px solid #555; border-radius: 6px; padding: 4px 10px; white-space: nowrap; flex: 0 0 auto; }
   button.primary { background: #31422c; border-color: #6d8f64; }
   .actions { margin-top: 10px; display: flex; gap: 8px; }
-  pre { white-space: pre-wrap; max-height: 28vh; overflow: auto; background: #1b1b1b; padding: 10px; }
-  #viewer { background: #1b1b1b; border: 1px solid #333; border-radius: 10px; padding: 12px 14px; margin: 0 0 12px; }
-  #viewer-body { max-height: 42vh; overflow: auto; }
-  #viewer-body details { margin: 4px 0; }
-  details.talk, details.log { margin-top: 8px; }
-  summary { cursor: pointer; color: #cfcfcf; }
-  .thought { color: #9a9a9a; } .tool { color: #9ec1ff; }
+  #viewer[hidden] { display: none; }
+  #viewer:not([hidden]) { flex: 1.4 1 0; min-height: 0; display: flex; flex-direction: column;
+    background: #161616; border: 1px solid #2e2e2e; border-radius: 12px; }
+  .viewer-bar { padding: 10px 14px; border-bottom: 1px solid #2a2a2a; align-items: center; }
+  #viewer-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 14px 18px; }
+  .msg { margin: 0; padding: 14px 0; border-bottom: 1px solid #262626; }
+  .who { font-size: 12px; font-weight: 650; margin-bottom: 6px; }
+  .msg-prompt .who { color: #e6c87a; }
+  .msg-say .who { color: #b9cdf7; }
+  .msg-tool .who { color: #9ec1ff; }
+  .msg-error .who { color: #f0a0a0; }
+  .md { color: #ececec; overflow-wrap: anywhere; }
+  .md > :first-child { margin-top: 0; }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { font-weight: 650; line-height: 1.3; margin: 0.75em 0 0.3em; }
+  .md h1 { font-size: 1.35em; } .md h2 { font-size: 1.2em; } .md h3 { font-size: 1.08em; }
+  .md h4, .md h5, .md h6 { font-size: 1em; }
+  .md p { margin: 0.45em 0; }
+  .md ul, .md ol { margin: 0.4em 0; padding-left: 1.3em; }
+  .md li { margin: 0.15em 0; }
+  .md a { color: #9ec1ff; }
+  .md-inline { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: #2a2a2a; padding: 0.1em 0.35em; border-radius: 4px; font-size: 0.92em; }
+  pre { margin: 0; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .md-code { white-space: pre-wrap; word-break: break-word; overflow: auto; background: #0e0e0e;
+    border: 1px solid #2c2c2c; border-radius: 8px; padding: 10px 12px; }
+  .thought { color: #8a8a8a; }
+  .thought summary, .msg-thought { color: #8a8a8a; }
+  .term { background: #0e0e0e; border: 1px solid #2a2a2a; border-radius: 8px; padding: 8px 10px; }
+  .term-call + .term-call { margin-top: 8px; padding-top: 8px; border-top: 1px solid #242424; }
+  .term-cmd { color: #e4e4e4; white-space: pre-wrap; word-break: break-word; }
+  .term-prompt { color: #8fd48f; }
+  .term-arg { color: #e6c87a; }
+  .term-out { margin-top: 6px; white-space: pre-wrap; word-break: break-word; color: #c8c8c8; }
+  .term-fold summary { cursor: pointer; color: #9a9a9a; }
+  .term-err { white-space: pre-wrap; word-break: break-word; color: #f0a0a0; background: #241616;
+    border: 1px solid #6e4040; border-radius: 8px; padding: 10px 12px; }
+  #activity { white-space: pre-wrap; max-height: 28vh; overflow: auto; background: #1b1b1b; padding: 10px; margin: 8px 0 0; }
+  details.log { margin-top: 4px; }
+  summary { cursor: pointer; }
+  @media (min-width: 860px) {
+    .workspace:has(#viewer:not([hidden])) { flex-direction: row; align-items: stretch; }
+    .workspace:has(#viewer:not([hidden])) #tasks { flex: 0 0 340px; }
+  }
   @media (max-width: 640px) {
     header { flex-direction: column; align-items: flex-start; }
     .top { flex-direction: column; }
+    .viewer-bar { flex-direction: row; align-items: center; }
+    .md-code, .term-cmd, .term-out, .term-err { font-size: 12px; }
   }
 </style>
 <header>
@@ -139,13 +185,18 @@ PAGE = """<!doctype html>
 <main>
   <p id="now">讀取中</p>
   <p id="flash" class="muted"></p>
-  <section id="viewer" hidden>
-    <div class="top"><div class="title" id="viewer-title">對話</div>
-      <button onclick="closeTalk()">關閉</button></div>
-    <div id="viewer-body"></div>
-  </section>
-  <div id="tasks"></div>
-  <details class="log"><summary>協調器紀錄</summary><pre id="activity" class="muted"></pre></details>
+  <div class="workspace">
+    <section id="viewer" hidden>
+      <div class="top viewer-bar"><div class="title" id="viewer-title">對話</div>
+        <button onclick="closeTalk()">關閉</button></div>
+      <div id="viewer-body"></div>
+    </section>
+    <div id="tasks"></div>
+  </div>
+  <details class="log">
+    <summary>協調器紀錄</summary>
+    <pre id="activity" class="muted"></pre>
+  </details>
 </main>
 <script>
 const STEPS = [['排隊','queue'],['拆任務','split'],['寫作','work'],['等 CI','ci'],['合併','merge']];
@@ -179,26 +230,149 @@ let state = {runs: []};
 let openRun = null;
 let openKeys = new Set();
 let talkSignature = '';
+let talkTicket = 0;
 function latestRun(taskId, role) {
   const matches = state.runs.filter(run => run.task_id === taskId && run.role === role);
   return matches.length ? matches[matches.length - 1] : null;
 }
-function foldTalk(messages) {
-  const take = kind => messages.filter(message => message.kind === kind);
-  const rows = [];
-  const prompt = take('prompt'), say = take('say'), thought = take('thought'), tool = take('tool'), error = take('error');
-  if (prompt.length) rows.push({kind:'prompt', title:'交給 agent', text: prompt.map(message => message.text).join('\\n\\n')});
-  if (say.length) rows.push({kind:'say', title:'回覆', text: say.map(message => message.text).join('\\n\\n')});
-  if (error.length) rows.push({kind:'error', title:'錯誤', text: error.map(message => message.text).join('\\n\\n')});
-  if (thought.length) rows.push({kind:'thought', title:'思考', text: thought.map(message => message.text).join('\\n\\n')});
-  let calls = 0;
-  for (const item of tool) {
-    const match = /^工具 (\\d+) 次/.exec(item.title);
-    calls += match ? Number(match[1]) : 1;
+function inlineMarkdown(text) {
+  const codes = [];
+  let body = text.replace(/`([^`\\n]+)`/g, (_, code) => {
+    codes.push('<code class="md-inline">' + code + '</code>');
+    return '%%C' + (codes.length - 1) + '%%';
+  });
+  body = body.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g,
+    '<a href="$2" rel="noopener noreferrer">$1</a>');
+  body = body.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+  body = body.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+  body = body.replace(/\\*([^*]+)\\*/g, '<em>$1</em>');
+  body = body.replace(/(^|[\\s])_([^_\\s][^_]*)_(?=$|[\\s])/g, '$1<em>$2</em>');
+  return body.replace(/%%C(\\d+)%%/g, (_, index) => codes[Number(index)] || '');
+}
+function renderMarkdown(source) {
+  const lines = esc(source).replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n').split('\\n');
+  const blocks = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (line.startsWith('```')) {
+      const buf = [];
+      index += 1;
+      while (index < lines.length && !lines[index].startsWith('```')) {
+        buf.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      blocks.push('<pre class="md-code"><code>' + buf.join('\\n') + '</code></pre>');
+      continue;
+    }
+    if (!line.trim()) { index += 1; continue; }
+    const heading = /^(#{1,6})\\s+(.+)$/.exec(line);
+    if (heading) {
+      const level = heading[1].length;
+      blocks.push('<h' + level + '>' + inlineMarkdown(heading[2]) + '</h' + level + '>');
+      index += 1;
+      continue;
+    }
+    if (/^\\s*[-*]\\s+/.test(line)) {
+      const items = [];
+      while (index < lines.length && /^\\s*[-*]\\s+/.test(lines[index])) {
+        items.push('<li>' + inlineMarkdown(lines[index].replace(/^\\s*[-*]\\s+/, '')) + '</li>');
+        index += 1;
+      }
+      blocks.push('<ul>' + items.join('') + '</ul>');
+      continue;
+    }
+    if (/^\\s*\\d+\\.\\s+/.test(line)) {
+      const items = [];
+      while (index < lines.length && /^\\s*\\d+\\.\\s+/.test(lines[index])) {
+        items.push('<li>' + inlineMarkdown(lines[index].replace(/^\\s*\\d+\\.\\s+/, '')) + '</li>');
+        index += 1;
+      }
+      blocks.push('<ol>' + items.join('') + '</ol>');
+      continue;
+    }
+    const para = [];
+    while (index < lines.length && lines[index].trim()
+        && !lines[index].startsWith('```')
+        && !/^(#{1,6})\\s+/.test(lines[index])
+        && !/^\\s*[-*]\\s+/.test(lines[index])
+        && !/^\\s*\\d+\\.\\s+/.test(lines[index])) {
+      para.push(lines[index]);
+      index += 1;
+    }
+    blocks.push('<p>' + para.map(inlineMarkdown).join('<br>') + '</p>');
   }
-  if (tool.length) rows.push({kind:'tool', title:'工具 ' + calls + ' 次',
-    text: tool.map(message => message.title + '\\n' + message.text).join('\\n\\n')});
-  return rows;
+  return blocks.join('');
+}
+function callsOf(message) {
+  if (Array.isArray(message.calls) && message.calls.length) return message.calls;
+  const command = message.command || '';
+  const output = message.output || '';
+  return [{
+    tool: message.tool || 'tool',
+    command: command,
+    output: output || (command ? '' : (message.text || ''))
+  }];
+}
+function shellTool(name) {
+  return /terminal|bash|shell/i.test(name || '');
+}
+function renderTool(message, index) {
+  const calls = callsOf(message);
+  const body = calls.map((call, callIndex) => {
+    const tool = String(call.tool || 'tool');
+    const command = String(call.command || '');
+    const output = String(call.output || '');
+    let head;
+    if (shellTool(tool) && command) {
+      head = '<div class="term-cmd"><span class="term-prompt">$ </span>' + esc(command) + '</div>';
+    } else {
+      head = '<div class="term-cmd"><span class="term-prompt">⏺ </span>' + esc(tool)
+        + (command ? '<span class="term-arg"> ' + esc(command) + '</span>' : '') + '</div>';
+    }
+    let out = '';
+    if (output) {
+      const rows = output.split('\\n');
+      const shown = '<pre class="term-out">' + esc(output) + '</pre>';
+      const long = rows.length > 16 || output.length > 800;
+      if (long) {
+        const key = 'out-' + index + '-' + callIndex;
+        const open = openKeys.has(key) ? ' open' : '';
+        out = '<details class="term-fold" data-key="' + key + '"' + open + '>'
+          + '<summary>輸出 ' + rows.length + ' 行</summary><div class="term-out-wrap">'
+          + shown + '</div></details>';
+      } else {
+        out = shown;
+      }
+    }
+    return '<div class="term-call">' + head + out + '</div>';
+  }).join('');
+  const title = message.title ? '<div class="who">' + esc(message.title) + '</div>' : '';
+  return '<article class="msg msg-tool">' + title + '<div class="term">' + body + '</div></article>';
+}
+function renderMessage(message, index) {
+  const kind = message.kind || 'say';
+  if (kind === 'tool') return renderTool(message, index);
+  if (kind === 'error') {
+    return '<article class="msg msg-error"><div class="who">' + esc(message.title || '錯誤')
+      + '</div><pre class="term-err">' + esc(message.text || '') + '</pre></article>';
+  }
+  const html = renderMarkdown(message.text || '');
+  if (kind === 'thought') {
+    const key = 'thought-' + index;
+    const open = openKeys.has(key) ? ' open' : '';
+    return '<article class="msg msg-thought"><details class="thought" data-key="' + key + '"' + open + '>'
+      + '<summary>' + esc(message.title || '思考') + '</summary><div class="md">' + html
+      + '</div></details></article>';
+  }
+  const tone = kind === 'prompt' ? 'msg-prompt' : 'msg-say';
+  return '<article class="msg ' + tone + '"><div class="who">' + esc(message.title || '')
+    + '</div><div class="md">' + html + '</div></article>';
+}
+function renderThread(messages) {
+  if (!messages.length) return '<p class="muted">呢次運行未有對話。</p>';
+  return messages.map(renderMessage).join('');
 }
 function closeTalk() {
   openRun = null;
@@ -216,39 +390,47 @@ async function showTalk(id) {
   await loadTalk();
 }
 async function loadTalk() {
-  if (!openRun) return;
+  const id = openRun;
+  if (!id) return;
+  const ticket = ++talkTicket;
   const viewer = document.getElementById('viewer');
   const log = document.getElementById('viewer-body');
-  const response = await fetch('/runs/' + openRun + '/transcript');
+  const response = await fetch('/runs/' + id + '/transcript');
+  if (openRun !== id || ticket !== talkTicket) return;
   const body = await response.json();
+  if (openRun !== id || ticket !== talkTicket) return;
   viewer.hidden = false;
+  const run = state.runs.find(item => item.id === id);
+  document.getElementById('viewer-title').textContent = run
+    ? (ROLE[run.role] || run.role) + ' · ' + (run.when || '') : '對話';
   if (body.blocked) {
+    talkSignature = '';
     log.textContent = body.blocked;
     return;
   }
-  const messages = foldTalk(body.messages || []);
-  const signature = messages.map(message => message.kind + '\\n' + message.title + '\\n' + message.text).join('\\n---\\n');
+  const messages = body.messages || [];
+  const signature = JSON.stringify(messages);
   if (signature === talkSignature) return;
+  const gap = log.scrollHeight - log.scrollTop - log.clientHeight;
+  const follow = talkSignature !== '' && gap < 48;
   const scroll = log.scrollTop;
+  const folded = new Set();
+  log.querySelectorAll('details[data-key]').forEach(node => {
+    if (node.open) folded.add(node.dataset.key);
+  });
+  openKeys = folded;
   talkSignature = signature;
-  if (!openKeys.size)
-    messages.forEach((message, index) => { if (message.kind === 'say') openKeys.add(String(index)); });
-  log.innerHTML = messages.map((message, index) => {
-    const key = String(index);
-    const show = openKeys.has(key) ? ' open' : '';
-    return '<details data-key="' + key + '"' + show + ' class="' + esc(message.kind) + '">'
-      + '<summary>' + esc(message.title) + '</summary><pre>' + esc(message.text) + '</pre></details>';
-  }).join('') || '<p class="muted">呢次運行未有對話。</p>';
-  log.scrollTop = scroll;
-  const run = state.runs.find(item => item.id === openRun);
-  document.getElementById('viewer-title').textContent = run
-    ? (ROLE[run.role] || run.role) + ' · ' + (run.when || '') : '對話';
+  log.innerHTML = renderThread(messages);
+  const running = !!(run && run.exit_code === null);
+  if (running && follow) log.scrollTop = log.scrollHeight;
+  else log.scrollTop = scroll;
 }
 document.getElementById('viewer-body').addEventListener('toggle', event => {
-  const key = event.target.dataset && event.target.dataset.key;
-  if (!key || event.target.parentElement.id !== 'viewer-body') return;
-  if (event.target.open) openKeys.add(key);
-  else openKeys.delete(key);
+  const node = event.target;
+  if (!node || !node.dataset || !node.dataset.key) return;
+  if (!event.currentTarget.contains(node)) return;
+  if (node.open) openKeys.add(node.dataset.key);
+  else openKeys.delete(node.dataset.key);
 }, true);
 function taskCard(task) {
   const here = STEPS.findIndex(step => step[1] === task.step);

@@ -611,6 +611,17 @@ class TranscriptTests(Fixture):
         self.assertIn('協調器紀錄', PAGE)
         self.assertNotIn('運行同對話', PAGE)
         self.assertNotIn('if (openRun) loadTalk()', PAGE)
+        self.assertIn('function renderMarkdown', PAGE)
+        self.assertIn('class="md"', PAGE)
+        self.assertIn('class="md-code"', PAGE)
+        self.assertIn('class="md-inline"', PAGE)
+        self.assertIn('class="term"', PAGE)
+        self.assertIn('class="term-cmd"', PAGE)
+        self.assertIn('class="term-prompt"', PAGE)
+        self.assertIn('class="term-out"', PAGE)
+        self.assertIn('class="term-err"', PAGE)
+        self.assertNotIn('foldTalk', PAGE)
+        self.assertNotIn("'</summary><pre>'", PAGE)
         with self.assertRaisesRegex(Blocked, 'unknown log'):
             transcript(self.home, '../config')
 
