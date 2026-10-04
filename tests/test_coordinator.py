@@ -6,6 +6,7 @@ import subprocess
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -15,7 +16,8 @@ from next_pr import engine, github, providers, runner
 from next_pr.cli import activation_gate, main, recover
 from next_pr.common import Blocked, atomic_json, lock, lock_held, now, read_json
 from next_pr.state import Store, initial_config, overlaps, repo_config
-from next_pr.ui import Handler, PAGE, snapshot, transcript
+from next_pr import ui
+from next_pr.ui import Handler, PAGE, overview, snapshot, transcript
 
 SHA = 'a' * 40
 OTHER = 'b' * 40
@@ -635,7 +637,7 @@ class DashboardHTTPTests(Fixture):
     def test_invalid_hosts_rejected_before_reading_or_mutating(self):
         for hosts in ([], ['attacker.example:8765'], ['127.0.0.1:9001'], ['localhost'],
                       ['127.0.0.1:8765', 'attacker.example:8765']):
-            for method, path in (('GET', '/'), ('GET', '/api/state'),
+            for method, path in (('GET', '/'), ('GET', '/api/state'), ('GET', '/api/overview'),
                                  ('GET', '/runs/' + 'ab' * 16 + '/transcript'),
                                  ('POST', '/tasks/id/pause')):
                 with self.subTest(hosts=hosts, method=method, path=path), \
@@ -797,3 +799,301 @@ class TranscriptTests(Fixture):
         self.assertNotIn('Y' * 2500, trailed['text'])
         self.assertIn('rg label', trailed['text'])
         self.assertEqual(trailed['calls'][0]['output'], trailed['output'])
+
+
+class OverviewTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        ui._clear_overview_cache()
+
+    def snapshot_payload(self, providers, host=None):
+        body = {'schemaVersion': 1, 'generatedAt': '2026-10-04T00:00:00Z', 'staleAfterSeconds': 180,
+                'host': {'codexBarVersion': '0.71.1', 'refreshIntervalSeconds': 0}, 'providers': providers}
+        if host:
+            body['host'].update(host)
+        return body
+
+    def completed(self, payload, returncode=0, stdout=None, stderr=b''):
+        if stdout is None:
+            stdout = json.dumps(payload).encode()
+        return subprocess.CompletedProcess(
+            ['codexbar', 'dashboard'], returncode, stdout, stderr)
+
+    def read(self, payload=None, **kwargs):
+        if payload is None and 'stdout' not in kwargs and 'error' not in kwargs:
+            raise AssertionError('payload')
+        if kwargs.get('error'):
+            runner = patch('next_pr.ui.subprocess.run', side_effect=kwargs['error'])
+        else:
+            runner = patch('next_pr.ui.subprocess.run', return_value=self.completed(
+                payload, kwargs.get('returncode', 0), kwargs.get('stdout'), kwargs.get('stderr', b'')))
+        which = kwargs.get('which', '/opt/homebrew/bin/codexbar')
+        with runner as run, patch('next_pr.ui.shutil.which', return_value=which):
+            body = overview()
+        return body, run
+
+    def test_parse_projects_enabled_provider_fields(self):
+        secret = 'sekret-token'
+        providers = [
+            {'id': 'codex', 'name': 'Codex', 'enabled': True,
+             'identity': {'accountEmail': 'person@example.com', 'plan': 'Pro 5x'},
+             'windows': [
+                 {'kind': 'session', 'label': 'Session', 'usedPercent': 28, 'remainingPercent': 72,
+                  'resetAt': '2026-10-04T12:00:00Z'},
+                 {'kind': 'weekly', 'label': 'Weekly', 'usedPercent': 10, 'remainingPercent': 90,
+                  'resetAt': '2026-10-10T00:00:00Z'},
+                 {'kind': 'codex-base-model-inference', 'label': 'gpt-reserve', 'usedPercent': 3,
+                  'remainingPercent': 97, 'resetAt': '2026-10-06T00:00:00Z'},
+             ],
+             'credits': {'remaining': 0, 'unit': 'credits'},
+             'cost': {'todayUSD': 3.86, 'last30DaysUSD': 699.9},
+             'pace': {'primary': {'summary': 'On pace | Expected 60% used | Lasts until reset', 'stage': 'ok'}},
+             'error': {'code': 'ok', 'message': 'fine', 'token': secret, 'cookie': 'yum'}},
+            {'id': 'hidden', 'name': 'Hidden', 'enabled': False,
+             'windows': [{'kind': 'session', 'label': 'Session', 'usedPercent': 1, 'remainingPercent': 99}]},
+        ]
+        body, run = self.read(self.snapshot_payload(providers))
+        argv = run.call_args.args[0]
+        self.assertEqual(argv, ['/opt/homebrew/bin/codexbar', 'dashboard', '--timeout', '25'])
+        self.assertIsNot(run.call_args.kwargs.get('shell'), True)
+        self.assertEqual(run.call_args.kwargs['timeout'], 30)
+        self.assertNotIn('--output', argv)
+        self.assertNotIn('serve', argv)
+        self.assertEqual(body, {
+            'ready': True,
+            'host': {'usageBarsShowUsed': False},
+            'providers': [{
+                'id': 'codex', 'name': 'Codex',
+                'windows': [
+                    {'kind': 'session', 'label': 'Session', 'percent': 72, 'resetAt': '2026-10-04T12:00:00Z'},
+                    {'kind': 'weekly', 'label': 'Weekly', 'percent': 90, 'resetAt': '2026-10-10T00:00:00Z'},
+                    {'kind': 'codex-base-model-inference', 'label': 'gpt-reserve', 'percent': 97,
+                     'resetAt': '2026-10-06T00:00:00Z'},
+                ],
+                'error': {'code': 'ok', 'message': 'fine'},
+                'plan': 'Pro 5x',
+                'credits': {'remaining': 0, 'unit': 'credits'},
+                'cost': {'todayUSD': 3.86, 'last30DaysUSD': 699.9},
+                'pace': {'primary': 'On pace | Expected 60% used | Lasts until reset'},
+            }],
+        })
+        dumped = json.dumps(body)
+        self.assertNotIn('person@example.com', dumped)
+        self.assertNotIn(secret, dumped)
+        self.assertNotIn('hidden', dumped)
+
+    def test_usage_bars_follow_show_used_flag(self):
+        window = {'kind': 'session', 'label': 'Session', 'usedPercent': 28, 'remainingPercent': 72,
+                  'resetAt': '2026-10-04T12:00:00Z'}
+        provider = {'id': 'claude', 'name': 'Claude', 'enabled': True, 'windows': [window], 'error': None}
+        cases = (
+            ({'usageBarsShowUsed': True}, 28),
+            ({'usageBarsShowUsed': False}, 72),
+            ({}, 72),
+        )
+        for host, percent in cases:
+            with self.subTest(host=host):
+                ui._clear_overview_cache()
+                body, _run = self.read(self.snapshot_payload([provider], host=host))
+                self.assertEqual(body['host']['usageBarsShowUsed'], host.get('usageBarsShowUsed') is True)
+                self.assertEqual(body['providers'][0]['windows'][0]['percent'], percent)
+        ui._clear_overview_cache()
+        payload = self.snapshot_payload([provider], host={'usageBarsShowUsed': True})
+        del payload['host']['usageBarsShowUsed']
+        body, _run = self.read(payload)
+        self.assertFalse(body['host']['usageBarsShowUsed'])
+        self.assertEqual(body['providers'][0]['windows'][0]['percent'], 72)
+        ui._clear_overview_cache()
+        payload = self.snapshot_payload([provider])
+        del payload['host']
+        body, _run = self.read(payload)
+        self.assertFalse(body['host']['usageBarsShowUsed'])
+        self.assertEqual(body['providers'][0]['windows'][0]['percent'], 72)
+
+    def test_idle_windows_are_omitted(self):
+        provider = {'id': 'antigravity', 'name': 'Antigravity', 'enabled': True, 'error': None, 'windows': [
+            {'kind': 'session', 'label': 'Gemini 5-hour', 'usedPercent': 12, 'remainingPercent': 88,
+             'resetAt': '2026-10-04T05:00:00Z'},
+            {'kind': 'weekly', 'label': 'Claude/GPT weekly', 'usedPercent': 0, 'remainingPercent': 100,
+             'idle': True, 'resetAt': '2026-10-10T00:00:00Z'},
+            {'kind': 'antigravity-quota-summary-3p-5h', 'label': 'Claude/GPT 5-hour', 'usedPercent': 1,
+             'remainingPercent': 99, 'idle': False},
+        ]}
+        body, _run = self.read(self.snapshot_payload([provider]))
+        windows = body['providers'][0]['windows']
+        self.assertEqual([item['label'] for item in windows], ['Gemini 5-hour', 'Claude/GPT 5-hour'])
+        self.assertEqual(windows[1]['kind'], 'antigravity-quota-summary-3p-5h')
+        self.assertNotIn('idle', json.dumps(windows))
+
+    def test_one_provider_error_keeps_the_other_row(self):
+        providers = [
+            {'id': 'cursor', 'name': 'Cursor', 'enabled': True, 'windows': [],
+             'error': {'code': 'unauthorized', 'kind': 'auth', 'message': 'Sign in again'}},
+            {'id': 'claude', 'name': 'Claude', 'enabled': True,
+             'identity': {'plan': 'Max'}, 'credits': None, 'cost': {'todayUSD': 1.5, 'last30DaysUSD': 9},
+             'windows': [{'kind': 'weekly', 'label': 'Weekly', 'usedPercent': 40, 'remainingPercent': 60,
+                          'resetAt': '2026-10-08T00:00:00Z'}],
+             'error': None},
+        ]
+        body, _run = self.read(self.snapshot_payload(providers))
+        cursor, claude = body['providers']
+        self.assertEqual(cursor['error'], {'code': 'unauthorized', 'kind': 'auth', 'message': 'Sign in again'})
+        self.assertEqual(cursor['windows'], [])
+        self.assertEqual(claude['plan'], 'Max')
+        self.assertEqual(claude['error'], None)
+        self.assertEqual(claude['windows'][0]['percent'], 60)
+        self.assertEqual(claude['cost'], {'todayUSD': 1.5, 'last30DaysUSD': 9})
+        self.assertNotIn('credits', claude)
+
+    def test_accounts_keep_label_active_and_pace(self):
+        provider = {
+            'id': 'claude', 'name': 'Claude', 'enabled': True, 'error': None, 'windows': [],
+            'accounts': [
+                {'id': 'claude-swap:2', 'label': 'personal', 'active': True,
+                 'identity': {'accountEmail': 'personal@example.com', 'plan': 'Max'},
+                 'windows': [
+                     {'kind': 'session', 'label': 'Session', 'usedPercent': 40, 'remainingPercent': 60,
+                      'resetAt': '2026-10-04T17:00:00Z'},
+                     {'kind': 'weekly', 'label': 'Fable only', 'usedPercent': 33, 'remainingPercent': 67,
+                      'idle': True},
+                 ],
+                 'pace': {'primary': {'summary': '20% in deficit | Expected 20% used | Lasts to reset'},
+                          'secondary': {'summary': ''}}},
+                {'label': 'expired', 'active': False, 'windows': [], 'pace': None,
+                 'error': 'Token expired'},
+            ],
+        }
+        body, _run = self.read(self.snapshot_payload([provider]))
+        accounts = body['providers'][0]['accounts']
+        self.assertEqual(accounts[0]['label'], 'personal')
+        self.assertTrue(accounts[0]['active'])
+        self.assertEqual(accounts[0]['plan'], 'Max')
+        self.assertEqual(accounts[0]['windows'], [
+            {'kind': 'session', 'label': 'Session', 'percent': 60, 'resetAt': '2026-10-04T17:00:00Z'}])
+        self.assertEqual(accounts[0]['pace'], {'primary': '20% in deficit | Expected 20% used | Lasts to reset'})
+        self.assertEqual(accounts[1], {'label': 'expired', 'active': False, 'error': 'Token expired'})
+        self.assertNotIn('personal@example.com', json.dumps(body))
+
+    def test_missing_cli_timeout_and_bad_json_are_not_ready(self):
+        ui._clear_overview_cache()
+        real_is_file = Path.is_file
+
+        def hidden_fallback(path):
+            if str(path) == ui._CODEXBAR_FALLBACK:
+                return False
+            return real_is_file(path)
+
+        with patch('next_pr.ui.shutil.which', return_value=None), \
+                patch('next_pr.ui.Path.is_file', hidden_fallback), \
+                patch('next_pr.ui.subprocess.run') as run:
+            body = overview()
+        self.assertEqual(body['ready'], False)
+        self.assertEqual(body['reason'], '找不到 CodexBar')
+        self.assertEqual(body['providers'], [])
+        run.assert_not_called()
+
+        ui._clear_overview_cache()
+        body, _run = self.read(error=subprocess.TimeoutExpired(['codexbar', 'dashboard'], 30))
+        self.assertEqual(body, {'ready': False, 'reason': 'CodexBar 逾時',
+                                'host': {'usageBarsShowUsed': False}, 'providers': []})
+
+        ui._clear_overview_cache()
+        body, _run = self.read(stdout=b'not-json token=sekret')
+        self.assertEqual(body['reason'], 'CodexBar 回應無效')
+        self.assertNotIn('sekret', json.dumps(body))
+        self.assertEqual(body['ready'], False)
+
+        ui._clear_overview_cache()
+        body, _run = self.read(returncode=1, stdout=b'{"schemaVersion":1}', stderr=b'token=sekret')
+        self.assertEqual(body['reason'], 'CodexBar 無法讀取')
+        self.assertNotIn('sekret', json.dumps(body))
+        self.assertNotIn('schemaVersion', json.dumps(body))
+
+        ui._clear_overview_cache()
+        body, _run = self.read({'schemaVersion': 2, 'providers': []})
+        self.assertEqual(body['reason'], 'CodexBar 資料版本不符')
+
+    def test_fallback_helper_when_codexbar_is_off_path(self):
+        real_is_file = Path.is_file
+
+        def fallback_exists(path):
+            if str(path) == ui._CODEXBAR_FALLBACK:
+                return True
+            return real_is_file(path)
+
+        payload = self.snapshot_payload([])
+        with patch('next_pr.ui.shutil.which', return_value=None), \
+                patch('next_pr.ui.Path.is_file', fallback_exists), \
+                patch('next_pr.ui.os.access', return_value=True), \
+                patch('next_pr.ui.subprocess.run', return_value=self.completed(payload)) as run:
+            body = overview()
+        self.assertTrue(body['ready'])
+        self.assertEqual(run.call_args.args[0][0], ui._CODEXBAR_FALLBACK)
+        self.assertEqual(run.call_args.args[0][1:], ['dashboard', '--timeout', '25'])
+
+    def test_cache_does_not_spawn_on_every_poll(self):
+        clock = {'now': 100.0}
+        payload = self.snapshot_payload([])
+        with patch('next_pr.ui.time.monotonic', side_effect=lambda: clock['now']), \
+                patch('next_pr.ui.subprocess.run', return_value=self.completed(payload)) as run, \
+                patch('next_pr.ui.shutil.which', return_value='/opt/homebrew/bin/codexbar'):
+            first = overview()
+            second = overview()
+            self.assertEqual(run.call_count, 1)
+            self.assertIs(first, second)
+            clock['now'] += ui._OVERVIEW_TTL_SECONDS
+            overview()
+            self.assertEqual(run.call_count, 2)
+
+    def test_slow_overview_does_not_block_snapshot(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def hang(*_args, **_kwargs):
+            started.set()
+            release.wait(5)
+            raise subprocess.TimeoutExpired(['codexbar', 'dashboard'], 30)
+
+        with patch('next_pr.ui.subprocess.run', side_effect=hang), \
+                patch('next_pr.ui.shutil.which', return_value='/opt/homebrew/bin/codexbar'):
+            worker = threading.Thread(target=overview)
+            worker.start()
+            try:
+                self.assertTrue(started.wait(1))
+                began = time.monotonic()
+                state = snapshot(self.store)
+                self.assertLess(time.monotonic() - began, 0.5)
+            finally:
+                release.set()
+                worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertIn('tasks', state)
+        self.assertNotIn('ready', state)
+
+    def _get_overview(self):
+        raw = 'GET /api/overview HTTP/1.1\r\nHost: 127.0.0.1:8765\r\n\r\n'
+        response = bytearray()
+        connection = SimpleNamespace(makefile=lambda *_: BytesIO(raw.encode()), sendall=response.extend)
+        with patch.object(Handler, 'home', self.home):
+            Handler(connection, ('127.0.0.1', 12345), SimpleNamespace(server_port=8765))
+        head, content = bytes(response).split(b'\r\n\r\n', 1)
+        return int(head.split()[1]), json.loads(content)
+
+    def test_overview_route_stays_http_200_without_store(self):
+        payload = self.snapshot_payload(
+            [{'id': 'grok', 'name': 'Grok', 'enabled': True, 'error': None, 'windows': []}])
+        with patch('next_pr.ui.subprocess.run', return_value=self.completed(payload)), \
+                patch('next_pr.ui.shutil.which', return_value='/opt/homebrew/bin/codexbar'), \
+                patch('next_pr.ui.Store') as store:
+            status, body = self._get_overview()
+            self.assertEqual(status, 200)
+            self.assertEqual(body['providers'][0]['id'], 'grok')
+            self.assertEqual(snapshot(self.store)['tasks'], [])
+            store.assert_not_called()
+        ui._clear_overview_cache()
+        with patch('next_pr.ui.subprocess.run', side_effect=subprocess.TimeoutExpired(['codexbar'], 30)), \
+                patch('next_pr.ui.shutil.which', return_value='/opt/homebrew/bin/codexbar'), \
+                patch('next_pr.ui.Store') as store:
+            status, body = self._get_overview()
+            self.assertEqual((status, body['ready'], body['reason']), (200, False, 'CodexBar 逾時'))
+            store.assert_not_called()

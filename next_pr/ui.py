@@ -1,7 +1,11 @@
-"""Local page for task state, daemon health, and run logs. Loopback only."""
+"""Local page for task state, daemon health, run logs, and a CodexBar overview. Loopback only."""
 import json
+import os
 import re
+import shutil
 import sqlite3
+import subprocess
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -41,6 +45,11 @@ except ImportError:
         return found
 
 RUN_ID = re.compile(r'[0-9a-f]{16,64}')
+_CODEXBAR_FALLBACK = '/Applications/CodexBar.app/Contents/Helpers/CodexBarCLI'
+_OVERVIEW_TTL_SECONDS = 30
+_OVERVIEW_TIMEOUT_SECONDS = 25
+_overview_lock = threading.Lock()
+_overview_cache = {'payload': None, 'monotonic': 0.0}
 STAGE_LABELS = {
     'queued': '排隊', 'handling': '拆任務', 'clarifying': '等你答', 'opening': '開 PR',
     'working': '寫作中', 'reading': '讀取中', 'coding': '寫作中', 'fixing': '修正中',
@@ -838,6 +847,214 @@ def act(store, task_id, action, attempts=20):
     raise Blocked('協調器忙碌，請再按一次')
 
 
+def _codexbar_argv():
+    """PATH `codexbar` first, then the app helper. One-shot dashboard only."""
+    binary = shutil.which('codexbar')
+    if not binary:
+        fallback = Path(_CODEXBAR_FALLBACK)
+        if fallback.is_file() and os.access(fallback, os.X_OK):
+            binary = str(fallback)
+    if not binary:
+        return None
+    return [binary, 'dashboard', '--timeout', str(_OVERVIEW_TIMEOUT_SECONDS)]
+
+
+def _number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _display_percent(window, show_used):
+    """`usageBarsShowUsed` true is usedPercent. False or absent is remainingPercent."""
+    key = 'usedPercent' if show_used else 'remainingPercent'
+    return _number(window.get(key))
+
+
+def _windows(raw, show_used):
+    if not isinstance(raw, list):
+        return []
+    rows = []
+    for item in raw:
+        if not isinstance(item, dict) or item.get('idle') is True:
+            continue
+        row = {}
+        for key in ('kind', 'label'):
+            if isinstance(item.get(key), str):
+                row[key] = item[key]
+        percent = _display_percent(item, show_used)
+        if percent is not None:
+            row['percent'] = percent
+        if isinstance(item.get('resetAt'), str) and item['resetAt']:
+            row['resetAt'] = item['resetAt']
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _pace_summaries(raw):
+    if not isinstance(raw, dict):
+        return None
+    summaries = {}
+    for key, item in raw.items():
+        if not isinstance(key, str):
+            continue
+        summary = item.get('summary') if isinstance(item, dict) else item
+        if isinstance(summary, str) and summary:
+            summaries[key] = summary
+    return summaries or None
+
+
+def _credits(raw):
+    if not isinstance(raw, dict):
+        return None
+    remaining = _number(raw.get('remaining'))
+    if remaining is None:
+        return None
+    credits = {'remaining': remaining}
+    if isinstance(raw.get('unit'), str) and raw['unit']:
+        credits['unit'] = raw['unit']
+    return credits
+
+
+def _cost(raw):
+    if not isinstance(raw, dict):
+        return None
+    cost = {}
+    for key in ('todayUSD', 'last30DaysUSD'):
+        number = _number(raw.get(key))
+        if number is not None:
+            cost[key] = number
+    return cost or None
+
+
+def _error(raw):
+    if isinstance(raw, str):
+        return raw or None
+    if isinstance(raw, dict):
+        kept = {key: raw[key] for key in ('code', 'kind', 'message') if isinstance(raw.get(key), str)}
+        return kept or None
+    return None
+
+
+def _plan(raw):
+    if isinstance(raw, dict) and isinstance(raw.get('plan'), str) and raw['plan']:
+        return raw['plan']
+    return None
+
+
+def _accounts(raw, show_used):
+    if not isinstance(raw, list):
+        return []
+    rows = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        account = {
+            'label': item.get('label') if isinstance(item.get('label'), str) else '',
+            'active': item.get('active') is True,
+        }
+        plan = _plan(item.get('identity'))
+        if plan:
+            account['plan'] = plan
+        windows = _windows(item.get('windows'), show_used)
+        if windows:
+            account['windows'] = windows
+        pace = _pace_summaries(item.get('pace'))
+        if pace:
+            account['pace'] = pace
+        error = _error(item.get('error'))
+        if error:
+            account['error'] = error
+        rows.append(account)
+    return rows
+
+
+def _provider_row(item, show_used):
+    row = {
+        'id': item.get('id') if isinstance(item.get('id'), str) else '',
+        'name': item.get('name') if isinstance(item.get('name'), str) else '',
+        'windows': _windows(item.get('windows'), show_used),
+        'error': _error(item.get('error')),
+    }
+    plan = _plan(item.get('identity'))
+    if plan:
+        row['plan'] = plan
+    credits = _credits(item.get('credits'))
+    if credits:
+        row['credits'] = credits
+    cost = _cost(item.get('cost'))
+    if cost:
+        row['cost'] = cost
+    pace = _pace_summaries(item.get('pace'))
+    if pace:
+        row['pace'] = pace
+    if 'accounts' in item:
+        row['accounts'] = _accounts(item.get('accounts'), show_used)
+    return row
+
+
+def _overview_not_ready(reason):
+    return {'ready': False, 'reason': reason, 'host': {'usageBarsShowUsed': False}, 'providers': []}
+
+
+def _reduce_overview(payload):
+    if not isinstance(payload, dict) or payload.get('schemaVersion') != 1:
+        return _overview_not_ready('CodexBar 資料版本不符')
+    host = payload.get('host') if isinstance(payload.get('host'), dict) else {}
+    show_used = host.get('usageBarsShowUsed') is True
+    providers = []
+    raw = payload.get('providers')
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict) and item.get('enabled') is True:
+                providers.append(_provider_row(item, show_used))
+    return {'ready': True, 'host': {'usageBarsShowUsed': show_used}, 'providers': providers}
+
+
+def _load_dashboard():
+    argv = _codexbar_argv()
+    if not argv:
+        return _overview_not_ready('找不到 CodexBar')
+    try:
+        result = subprocess.run(
+            argv, stdin=subprocess.DEVNULL, capture_output=True,
+            timeout=_OVERVIEW_TIMEOUT_SECONDS + 5)
+    except subprocess.TimeoutExpired:
+        return _overview_not_ready('CodexBar 逾時')
+    except OSError:
+        return _overview_not_ready('找不到 CodexBar')
+    if result.returncode != 0:
+        return _overview_not_ready('CodexBar 無法讀取')
+    try:
+        payload = json.loads(result.stdout)
+    except (UnicodeError, ValueError):
+        return _overview_not_ready('CodexBar 回應無效')
+    return _reduce_overview(payload)
+
+
+def _clear_overview_cache():
+    with _overview_lock:
+        _overview_cache['payload'] = None
+        _overview_cache['monotonic'] = 0.0
+
+
+def overview():
+    """Cached `codexbar dashboard` read. A miss, timeout, or bad payload stays not-ready."""
+    now_at = time.monotonic()
+    with _overview_lock:
+        cached = _overview_cache['payload']
+        if cached is not None and now_at - _overview_cache['monotonic'] < _OVERVIEW_TTL_SECONDS:
+            return cached
+        try:
+            payload = _load_dashboard()
+        except Exception:
+            payload = _overview_not_ready('CodexBar 未就緒')
+        _overview_cache['payload'] = payload
+        _overview_cache['monotonic'] = time.monotonic()
+        return payload
+
+
 class Handler(BaseHTTPRequestHandler):
     home = None
 
@@ -886,6 +1103,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         elif parsed.path == '/api/state':
             self.finish_json(snapshot)
+        elif parsed.path == '/api/overview':
+            self.send_json(overview())
         elif parsed.path.startswith('/runs/'):
             parts = parsed.path.split('/')
             if len(parts) != 4 or not parts[2] or parts[3] not in {'transcript', 'stdout', 'stderr'}:
