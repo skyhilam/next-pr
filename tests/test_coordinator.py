@@ -1,17 +1,21 @@
+from io import BytesIO
 import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from next_pr import engine, github, providers, runner
-from next_pr.cli import activation_gate, recover
+from next_pr.cli import activation_gate, main, recover
 from next_pr.common import Blocked, atomic_json, lock, lock_held, now, read_json
 from next_pr.state import Store, initial_config, overlaps, repo_config
+from next_pr.ui import Handler, PAGE, snapshot, transcript
 
 SHA = 'a' * 40
 OTHER = 'b' * 40
@@ -555,3 +559,241 @@ class CrashTests(Fixture):
         with self.assertRaisesRegex(Blocked, 'outside'):
             Store(path / 'state')
         self.assertFalse((path / 'state').exists())
+
+
+class DashboardTests(Fixture):
+    @patch('next_pr.cli.ui.serve')
+    def test_cli_ui_dispatches_without_holding_state_lock(self, serve):
+        with patch('next_pr.cli.Store') as store:
+            for options, port in (([], 8765), (['--port', '9001'], 9001)):
+                self.assertEqual(main(['--home', str(self.home), 'ui', *options]), 0)
+                serve.assert_called_with(self.home, '127.0.0.1', port)
+            store.assert_not_called()
+
+    @unittest.skipUnless(shutil.which('node'), 'Node is needed for browser JavaScript checks')
+    def test_real_store_snapshot_opens_every_run_without_task_items(self):
+        task = self.task()
+        self.assertNotIn('items', task)
+        logs = {}
+        for index, run_id in enumerate(('ab' * 16, 'cd' * 16)):
+            directory = self.home / 'runs' / run_id
+            directory.mkdir(parents=True)
+            (directory / 'prompt.txt').write_text('# Request\n- Keep `code`')
+            (directory / 'stdout.log').write_text(json.dumps({'type': 'text', 'data': '## Reply\nDone'}))
+            self.store.save_run(dict(id=run_id, task_id=task['id'], role='writer',
+                                     provider='codex', created_at=now() + index,
+                                     directory=str(directory),
+                                     receipt={'exit_code': 0} if index == 0 else None))
+            logs[run_id] = transcript(self.home, run_id)
+        other = self.task(scope='web', key='two')
+        page_state = snapshot(self.store)
+        self.assertEqual(len(page_state['runs']), 2)
+        self.assertNotIn('items', page_state['tasks'][0])
+        self.assertEqual(page_state['tasks'][1]['id'], other['id'])
+        check = Path(__file__).with_name('ui_page.cjs')
+        result = subprocess.run(['node', str(check)], input=json.dumps({
+            'page': PAGE, 'state': page_state, 'logs': logs}), text=True,
+            capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+class DashboardHTTPTests(Fixture):
+    def request(self, path, method='GET', headers=None):
+        if headers is None:
+            headers = [('Host', '127.0.0.1:8765')]
+        raw = f'{method} {path} HTTP/1.1\r\n'
+        raw += ''.join(f'{key}: {value}\r\n' for key, value in headers) + '\r\n'
+        response = bytearray()
+        connection = SimpleNamespace(makefile=lambda *_: BytesIO(raw.encode()),
+                                     sendall=response.extend)
+        server = SimpleNamespace(server_port=8765)
+        with patch.object(Handler, 'home', self.home):
+            Handler(connection, ('127.0.0.1', 12345), server)
+        head, body = bytes(response).split(b'\r\n\r\n', 1)
+        status = int(head.split()[1])
+        if b'application/json' in head:
+            return status, json.loads(body)
+        return status, body.decode()
+
+    def test_valid_hosts_can_read_page_state_and_transcript(self):
+        task = self.task()
+        run_id = 'ab' * 16
+        directory = self.home / 'runs' / run_id
+        directory.mkdir(parents=True)
+        (directory / 'prompt.txt').write_text('Private prompt')
+        for host in ('127.0.0.1:8765', 'localhost:8765'):
+            with self.subTest(host=host):
+                headers = [('Host', host)]
+                self.assertEqual(self.request('/', headers=headers), (200, PAGE))
+                status, body = self.request('/api/state', headers=headers)
+                self.assertEqual(status, 200)
+                self.assertEqual(body['tasks'][0]['id'], task['id'])
+                status, body = self.request(f'/runs/{run_id}/transcript', headers=headers)
+                self.assertEqual(status, 200)
+                self.assertEqual(body['messages'][0]['text'], 'Private prompt')
+
+    def test_invalid_hosts_rejected_before_reading_or_mutating(self):
+        for hosts in ([], ['attacker.example:8765'], ['127.0.0.1:9001'], ['localhost'],
+                      ['127.0.0.1:8765', 'attacker.example:8765']):
+            for method, path in (('GET', '/'), ('GET', '/api/state'),
+                                 ('GET', '/runs/' + 'ab' * 16 + '/transcript'),
+                                 ('POST', '/tasks/id/pause')):
+                with self.subTest(hosts=hosts, method=method, path=path), \
+                        patch('next_pr.ui.Store') as store:
+                    headers = [('Host', host) for host in hosts]
+                    headers.append(('Origin', 'http://127.0.0.1:8765'))
+                    self.assertEqual(self.request(path, method, headers),
+                                     (403, {'blocked': 'invalid host'}))
+                    store.assert_not_called()
+
+    def test_post_requires_exact_same_origin_and_preserves_controls(self):
+        for host in ('127.0.0.1:8765', 'localhost:8765'):
+            origins = ([], ['null'], ['https://' + host], ['http://attacker.example:8765'],
+                       ['http://localhost:9001'], ['http://' + host, 'http://' + host],
+                       ['http://' + ('localhost:8765' if host.startswith('127') else '127.0.0.1:8765')])
+            for origin in origins:
+                with self.subTest(host=host, origin=origin), patch('next_pr.ui.Store') as store:
+                    headers = [('Host', host)] + [('Origin', value) for value in origin]
+                    self.assertEqual(self.request('/tasks/id/pause', 'POST', headers),
+                                     (403, {'blocked': 'same-origin request required'}))
+                    store.assert_not_called()
+            for action in ('pause', 'resume', 'cancel'):
+                with self.subTest(host=host, action=action), \
+                        patch('next_pr.ui.act', return_value={'ok': True}) as act:
+                    headers = [('Host', host), ('Origin', 'http://' + host)]
+                    self.assertEqual(self.request('/tasks/id/' + action, 'POST', headers),
+                                     (200, {'ok': True}))
+                    self.assertEqual(act.call_args.args[1:], ('id', action))
+
+    def test_malformed_run_routes_return_json_404(self):
+        run = 'ab' * 16
+        for path in ('/runs/', f'/runs/{run}', f'/runs/{run}/', '/runs//transcript',
+                     f'/runs/{run}/transcript/extra', f'/runs/{run}/unknown'):
+            with self.subTest(path=path):
+                self.assertEqual(self.request(path), (404, {'blocked': 'not found'}))
+
+
+class TranscriptTests(Fixture):
+    def test_page_keeps_conversation_primary_and_task_controls_available(self):
+        self.assertIn('<html lang="zh-Hant">', PAGE)
+        self.assertIn('name="viewport" content="width=device-width, initial-scale=1"', PAGE)
+        self.assertIn('<section id="viewer" aria-labelledby="viewer-title">', PAGE)
+        self.assertIn('<aside class="sidebar" aria-labelledby="tasks-title">', PAGE)
+        self.assertLess(PAGE.index('id="viewer"'), PAGE.index('class="sidebar"'))
+        for identifier in ('tasks', 'now', 'flash', 'daemon', 'providers', 'activity', 'viewer-status'):
+            self.assertIn('id="' + identifier + '"', PAGE)
+        self.assertIn('<article class="task-row', PAGE)
+        self.assertIn('grid-template-columns: minmax(0, 1fr) minmax(260px, 30%)', PAGE)
+        self.assertIn('@media (max-width: 640px)', PAGE)
+        self.assertIn('.workspace { display: flex; flex-direction: column; }', PAGE)
+        self.assertNotIn("document.getElementById('viewer').hidden = true", PAGE)
+        self.assertIn("action === 'cancel' && !confirm(", PAGE)
+        for label in ('暫停', '繼續', '取消', '協調器紀錄', '工具就緒'):
+            self.assertIn(label, PAGE)
+
+    def test_transcript_shows_speech_tools_and_refuses_other_runs(self):
+        run = self.home / 'runs' / ('ab' * 16)
+        run.mkdir(parents=True)
+        (run / 'prompt.txt').write_text('Please change the label')
+        (run / 'manifest.json').write_text(json.dumps({'provider': 'grok', 'role': 'code'}))
+        contract = json.dumps({'status': 'completed', 'summary': 'Label updated', 'tests': [], 'blockers': []})
+        (run / 'stdout.log').write_text('\n'.join([
+            json.dumps({'type': 'thought', 'data': 'Looking'}),
+            json.dumps({'type': 'thought', 'data': ' at the file'}),
+            json.dumps({'type': 'tool_call', 'toolCallId': 'c1', 'toolName': 'read_file',
+                        'rawInput': {'target_file': 'app/Label.kt'}}),
+            json.dumps({'type': 'tool_call_update', 'toolCallId': 'c1', 'status': 'completed',
+                        'content': [{'type': 'content', 'content': 'class Label'}]}),
+            json.dumps({'type': 'text', 'data': contract[:8]}),
+            json.dumps({'type': 'text', 'data': contract[8:]}),
+        ]) + '\n')
+        page = transcript(self.home, 'ab' * 16)
+        self.assertEqual(page['provider'], 'grok')
+        self.assertEqual([item['kind'] for item in page['messages']], ['prompt', 'thought', 'tool', 'say'])
+        self.assertEqual(page['messages'][0]['text'], 'Please change the label')
+        self.assertEqual(page['messages'][1]['text'], 'Looking at the file')
+        self.assertIn('Label.kt', page['messages'][2]['text'])
+        self.assertIn('class Label', page['messages'][2]['text'])
+        self.assertEqual(page['messages'][2]['tool'], 'read_file')
+        self.assertEqual(page['messages'][2]['command'], 'app/Label.kt')
+        self.assertEqual(page['messages'][2]['output'], 'class Label')
+        self.assertEqual(page['messages'][2]['calls'], [
+            {'tool': 'read_file', 'command': 'app/Label.kt', 'output': 'class Label'}])
+        self.assertIn('Label updated', page['messages'][3]['text'])
+        run = self.home / 'runs' / ('cd' * 16)
+        run.mkdir()
+        (run / 'prompt.txt').write_text('Look')
+        calls = []
+        for index, name in enumerate(('read_file', 'grep', 'grep')):
+            calls.append(json.dumps({'type': 'tool_call', 'toolCallId': str(index), 'toolName': name,
+                                     'rawInput': {'target_file': 'a.kt'}}))
+        calls.append(json.dumps({'type': 'text', 'data': json.dumps(self.result())}))
+        (run / 'stdout.log').write_text('\n'.join(calls) + '\n')
+        grouped = transcript(self.home, 'cd' * 16)
+        self.assertEqual([item['kind'] for item in grouped['messages']], ['prompt', 'tool', 'say'])
+        self.assertIn('3 次', grouped['messages'][1]['title'])
+        self.assertIn('read_file 1', grouped['messages'][1]['title'])
+        grouped_calls = grouped['messages'][1]['calls']
+        self.assertEqual(len(grouped_calls), 3)
+        self.assertEqual([item['tool'] for item in grouped_calls], ['read_file', 'grep', 'grep'])
+        self.assertEqual([item['command'] for item in grouped_calls], ['a.kt', 'a.kt', 'a.kt'])
+        self.assertTrue(all(item['output'] == '' for item in grouped_calls))
+        self.assertIn('id="viewer"', PAGE)
+        self.assertIn('id="now"', PAGE)
+        self.assertIn('協調器紀錄', PAGE)
+        self.assertNotIn('運行同對話', PAGE)
+        self.assertNotIn('if (openRun) loadTalk()', PAGE)
+        self.assertIn('function renderMarkdown', PAGE)
+        self.assertIn('class="md"', PAGE)
+        self.assertIn('class="md-code"', PAGE)
+        self.assertIn('class="md-inline"', PAGE)
+        self.assertIn('class="term"', PAGE)
+        self.assertIn('class="term-cmd"', PAGE)
+        self.assertIn('class="term-prompt"', PAGE)
+        self.assertIn('class="term-out"', PAGE)
+        self.assertIn('class="term-err"', PAGE)
+        self.assertNotIn('foldTalk', PAGE)
+        self.assertNotIn("'</summary><pre>'", PAGE)
+        with self.assertRaisesRegex(Blocked, 'unknown log'):
+            transcript(self.home, '../config')
+
+    def test_transcript_keeps_order_clips_and_splits_stderr(self):
+        run = self.home / 'runs' / ('ef' * 16)
+        run.mkdir(parents=True)
+        prompt = 'P' * 5000
+        (run / 'prompt.txt').write_text(prompt)
+        (run / 'stdout.log').write_text('\n'.join([
+            json.dumps({'type': 'thought', 'data': 'Hmm'}),
+            json.dumps({'type': 'error', 'message': 'model blew up'}),
+            json.dumps({'type': 'tool_call', 'toolCallId': 'a', 'toolName': 'read_file',
+                        'rawInput': {'target_file': 'left.kt'}}),
+            json.dumps({'type': 'text', 'data': 'between'}),
+            json.dumps({'type': 'tool_call', 'toolCallId': 'b', 'toolName': 'grep',
+                        'rawInput': {'command': 'rg label'}}),
+            json.dumps({'type': 'tool_call_update', 'toolCallId': 'b', 'status': 'completed',
+                        'rawOutput': 'Y' * 2500}),
+        ]) + '\n')
+        (run / 'stderr.log').write_text('E' * 5000)
+        page = transcript(self.home, 'ef' * 16)
+        self.assertEqual([item['kind'] for item in page['messages']],
+                         ['prompt', 'thought', 'error', 'tool', 'say', 'tool', 'error'])
+        self.assertEqual(page['messages'][0]['text'], prompt)
+        self.assertEqual(page['messages'][1]['text'], 'Hmm')
+        model, stderr = page['messages'][2], page['messages'][6]
+        self.assertEqual(model['source'], 'model')
+        self.assertEqual(model['title'], '錯誤')
+        self.assertEqual(model['text'], 'model blew up')
+        self.assertEqual(stderr['source'], 'stderr')
+        self.assertEqual(stderr['title'], 'stderr')
+        self.assertNotEqual(model['source'], stderr['source'])
+        self.assertEqual(stderr['text'], ('E' * 4000) + '\n…已截短')
+        self.assertEqual(page['messages'][3]['command'], 'left.kt')
+        self.assertEqual(page['messages'][3]['output'], '')
+        self.assertEqual(page['messages'][4]['text'], 'between')
+        trailed = page['messages'][5]
+        self.assertEqual(trailed['tool'], 'grep')
+        self.assertEqual(trailed['command'], 'rg label')
+        self.assertEqual(trailed['output'], ('Y' * 2000) + '\n…已截短')
+        self.assertNotIn('Y' * 2500, trailed['text'])
+        self.assertIn('rg label', trailed['text'])
+        self.assertEqual(trailed['calls'][0]['output'], trailed['output'])

@@ -35,6 +35,15 @@ python3 -m next_pr status
 python3 -m next_pr metrics
 ```
 
+初始化後，在另一個終端機執行 `python3 -m next_pr ui --port 8765`，再開啟
+`http://127.0.0.1:8765/` 或 `http://localhost:8765/`。預設連接埠為 8765；
+自訂資料目錄可用 `python3 -m next_pr --home /path/to/state ui`。
+頁面伺服器在前景執行，按 Ctrl-C 停止，不會自動啟動協調器。
+任務清單會列出每次運行，按「對話」查看 Markdown 對話及終端機輸出；
+暫停、繼續、取消、協調器／供應商狀態及活動紀錄仍在同一頁。
+HTTP 僅接受上述本機 Host 及所選連接埠，任務操作的 POST 須帶相符的
+`http://host:port` Origin。
+
 初始只啟用尚未確認計費的 Codex；可只確認 Codex 後啟動，但需要 Claude
 寫入／獨立審查的任務會明確阻塞。主要寫入者按提交順序交替 Codex／Claude；
 最多兩個開發工作、一個審查，重型驗證逐一執行。重疊 scope 必須指定
