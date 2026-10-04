@@ -122,14 +122,16 @@ PAGE = """<!doctype html>
   h1 { font: 650 17px/1.5 var(--mono); margin: 0; }
   h2 { font-size: 14px; font-weight: 600; margin: 0; }
   .health { font-size: 12px; overflow-wrap: anywhere; }
-  main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
-  .status-bar { flex: 0 0 auto; padding: 10px 20px; border-bottom: 1px solid var(--line); background: #1b1c20; }
+  main { flex: 1 1 auto; min-height: 0; min-width: 0; display: grid;
+    grid-template-columns: minmax(300px, 380px) minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr); }
+  main > * { min-width: 0; overflow-wrap: anywhere; }
+  .status-bar { grid-column: 1 / -1; padding: 10px 20px; border-bottom: 1px solid var(--line); background: #1b1c20; }
   #now { margin: 0; overflow-wrap: anywhere; }
   #flash { margin: 4px 0 0; font-size: 13px; overflow-wrap: anywhere; }
   #flash:empty { display: none; }
   .muted { color: var(--muted); }
   .ok { color: #9bd3aa; } .bad { color: #f0a0a0; } .wait { color: #e6c87a; }
-  #overview { flex: 0 0 auto; min-width: 0; max-height: 34vh; overflow: auto;
+  #overview { grid-column: 1 / -1; min-width: 0; max-height: 34vh; overflow: auto;
     padding: 12px 20px; border-bottom: 1px solid var(--line); background: #1b1c20; }
   .overview-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
   .overview-heading span, #overview-content { font-size: 12px; }
@@ -149,9 +151,8 @@ PAGE = """<!doctype html>
   .overview-pace, .overview-error { margin: 6px 0 0; }
   .overview-account { margin-top: 10px; padding: 8px 0 0 12px; border-left: 2px solid var(--line); }
   .overview-account-heading { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-bottom: 6px; }
-  .workspace { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 30%); }
   .sidebar { min-width: 0; min-height: 0; display: flex; flex-direction: column;
-    background: #1b1c20; border-left: 1px solid var(--line); }
+    background: #1b1c20; border-right: 1px solid var(--line); }
   .sidebar-heading { padding: 14px 16px; border-bottom: 1px solid var(--line); }
   #tasks { flex: 1 1 auto; min-height: 0; overflow: auto; }
   #tasks > .muted { padding: 0 16px; }
@@ -188,7 +189,7 @@ PAGE = """<!doctype html>
   .empty-thread { max-width: 36em; margin: 12vh auto; }
   .empty-thread h3 { font-size: 22px; font-weight: 500; margin: 0 0 10px; }
   .empty-thread p { margin: 0; color: var(--muted); }
-  .msg { margin: 0; padding: 14px 0; border-bottom: 1px solid #262626; }
+  .msg { max-width: 88ch; margin: 0; padding: 14px 0; border-bottom: 1px solid #262626; }
   .who { font-size: 12px; font-weight: 650; margin-bottom: 6px; }
   .msg-prompt .who { color: #e6c87a; }
   .msg-say .who { color: #b9cdf7; }
@@ -205,7 +206,9 @@ PAGE = """<!doctype html>
   .md a { color: #9ec1ff; }
   .md-inline { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     background: #2a2a2a; padding: 0.1em 0.35em; border-radius: 4px; font-size: 0.92em; }
-  pre { margin: 0; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere;
+    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  #viewer pre, #viewer details { max-width: 88ch; }
   .md-code { white-space: pre-wrap; word-break: break-word; overflow: auto; background: #0e0e0e;
     border: 1px solid #2c2c2c; border-radius: 8px; padding: 10px 12px; }
   .thought { color: #8a8a8a; }
@@ -224,17 +227,17 @@ PAGE = """<!doctype html>
   details.log { flex: 0 0 auto; border-top: 1px solid var(--line); }
   details.log > summary { padding: 12px 16px; font: 12px/1.6 var(--mono); }
   summary { cursor: pointer; }
-  @media (max-width: 640px) {
+  @media (max-width: 900px) {
     body { height: auto; min-height: 100vh; min-height: 100dvh; }
+    main { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; }
     .app-header { padding: 10px 14px; }
     .health { width: 100%; }
     .status-bar { padding: 10px 14px; }
     #overview { max-height: none; overflow: visible; padding: 12px 14px; }
     .overview-provider { grid-template-columns: minmax(0, 1fr); }
-    .workspace { display: flex; flex-direction: column; }
     #viewer { height: 65vh; height: 65dvh; min-height: 320px; flex: 0 0 auto; }
     .viewer-bar { padding: 10px 14px; }
-    .sidebar { border-left: 0; border-top: 1px solid var(--line); }
+    .sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
     #tasks { overflow: visible; }
     .empty-thread { margin: 6vh auto; }
     button { min-height: 40px; }
@@ -255,31 +258,29 @@ PAGE = """<!doctype html>
     <p id="flash" class="muted" role="status"></p>
   </div>
   <section id="overview" aria-labelledby="overview-title" tabindex="0">
-    <div class="overview-heading"><h2 id="overview-title">CodexBar Overview</h2>
+    <div class="overview-heading"><h2 id="overview-title">CodexBar 用量總覽</h2>
       <span class="muted">本機用量總覽 · 每 30 秒更新</span></div>
     <div id="overview-content" aria-live="polite"><p class="muted">讀取總覽中…</p></div>
   </section>
-  <div class="workspace">
-    <section id="viewer" aria-labelledby="viewer-title">
-      <div class="top viewer-bar">
-        <div class="viewer-heading"><h2 id="viewer-title">對話</h2>
-          <div id="viewer-status" class="muted">等待選取任務</div></div>
-        <button id="viewer-close" onclick="closeTalk()" hidden>關閉對話</button>
-      </div>
-      <div id="viewer-body" tabindex="0" aria-label="對話紀錄">
-        <div class="empty-thread"><h3>從一段對話開始</h3>
-          <p>在任務清單選取「對話」，查看代理的回覆、思考與工具紀錄。</p></div>
-      </div>
-    </section>
-    <aside class="sidebar" aria-labelledby="tasks-title">
-      <h2 id="tasks-title" class="sidebar-heading">任務</h2>
-      <div id="tasks"></div>
-      <details class="log">
-        <summary>協調器紀錄</summary>
-        <pre id="activity" class="muted"></pre>
-      </details>
-    </aside>
-  </div>
+  <aside class="sidebar" aria-labelledby="tasks-title">
+    <h2 id="tasks-title" class="sidebar-heading">任務</h2>
+    <div id="tasks"></div>
+    <details class="log">
+      <summary>協調器紀錄</summary>
+      <pre id="activity" class="muted"></pre>
+    </details>
+  </aside>
+  <section id="viewer" aria-labelledby="viewer-title">
+    <div class="top viewer-bar">
+      <div class="viewer-heading"><h2 id="viewer-title">對話</h2>
+        <div id="viewer-status" class="muted">等待選取任務</div></div>
+      <button id="viewer-close" onclick="closeTalk()" hidden>關閉對話</button>
+    </div>
+    <div id="viewer-body" tabindex="0" aria-label="對話紀錄">
+      <div class="empty-thread muted"><h3>選一個任務的對話</h3>
+        <p>在任務清單選取「對話」，查看代理的回覆、思考與工具紀錄。</p></div>
+    </div>
+  </section>
 </main>
 <script>
 const STEPS = [['排隊','queue'],['拆任務','split'],['寫作','work'],['等 CI','ci'],['合併','merge']];
@@ -352,7 +353,7 @@ function overviewDetails(row, showUsed) {
 }
 function renderOverview(data) {
   if (!data || data.ready !== true || !Array.isArray(data.providers)) {
-    return '<p class="muted">Overview 未就緒：' + esc(data?.reason || '無法讀取本機總覽') + '</p>';
+    return '<p class="muted">總覽未就緒：' + esc(data?.reason || '無法讀取本機總覽') + '</p>';
   }
   const showUsed = data.host?.usageBarsShowUsed === true;
   return data.providers.filter(row => row.enabled !== false).map(row => {
@@ -538,7 +539,7 @@ async function showTalk(id) {
   }
   openRun = id;
   await loadTalk();
-  if (openRun === id && matchMedia('(max-width: 640px)').matches) {
+  if (openRun === id && matchMedia('(max-width: 900px)').matches) {
     document.getElementById('viewer').scrollIntoView({block: 'start'});
   }
 }
