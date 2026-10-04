@@ -673,21 +673,32 @@ def daemon_running(home):
         handle.close()
 
 
+def _public_task(task):
+    label, step = present_task(task)
+    pr_url = task.get('pr_url')
+    if not pr_url and task.get('pr_number'):
+        pr_url = f'https://github.com/{task["repo"]}/pull/{task["pr_number"]}'
+    return {
+        'id': task['id'], 'title': task['title'], 'repo': task['repo'], 'stage': task['stage'],
+        'stage_label': label, 'step': step, 'paused': bool(task.get('paused')),
+        'note': task.get('note') or '', 'plain_note': plain_note(task.get('note') or ''),
+        'pr_number': task.get('pr_number'), 'pr_url': pr_url,
+    }
+
+
 def snapshot(store):
     pauses = store.meta('provider_pauses', {})
     cfg = config(store.home)
-    tasks = []
-    for task in store.tasks():
-        label, step = present_task(task)
-        pr_url = task.get('pr_url')
-        if not pr_url and task.get('pr_number'):
-            pr_url = f'https://github.com/{task["repo"]}/pull/{task["pr_number"]}'
-        tasks.append({
-            'id': task['id'], 'title': task['title'], 'repo': task['repo'], 'stage': task['stage'],
-            'stage_label': label, 'step': step, 'paused': bool(task.get('paused')),
-            'note': task.get('note') or '', 'plain_note': plain_note(task.get('note') or ''),
-            'pr_number': task.get('pr_number'), 'pr_url': pr_url,
-        })
+    tasks = [_public_task(task) for task in store.tasks()]
+    by_repo = {}
+    for task in tasks:
+        by_repo.setdefault(task['repo'], []).append(task)
+    registered = cfg.get('repos') if isinstance(cfg.get('repos'), dict) else {}
+    projects = [{'repo': repo, 'tasks': by_repo.get(repo, [])} for repo in registered]
+    listed = set(registered)
+    for repo, items in by_repo.items():
+        if repo not in listed:
+            projects.append({'repo': repo, 'tasks': items})
     runs = []
     for run in sorted(store.runs(), key=lambda item: item.get('created_at') or 0):
         receipt = run.get('receipt') or {}
@@ -706,6 +717,7 @@ def snapshot(store):
                        'paused': bool(pauses.get(name))}
                       for name, item in cfg['providers'].items()],
         'tasks': tasks,
+        'projects': projects,
         'runs': runs,
         'activity': '\n'.join(text.splitlines()[-40:]),
     }
@@ -918,6 +930,32 @@ def transcript(home, run_id):
                              'text': _clip(stderr, 4000)})
     return {'id': run_id, 'provider': manifest.get('provider') or '',
             'role': manifest.get('role') or '', 'messages': messages}
+
+
+def task_transcript(store, task_id):
+    """One task's run messages, oldest first, each marked with run id, role, provider, and time."""
+    if not RUN_ID.fullmatch(task_id or ''):
+        raise Blocked('unknown task')
+    task = store.task(task_id)
+    runs = sorted(store.runs(task_id), key=lambda item: (item.get('created_at') or 0, item.get('id') or ''))
+    segments, messages = [], []
+    for run in runs:
+        body = transcript(store.home, run['id'])
+        role = run.get('role') or body.get('role') or ''
+        provider = run.get('provider') or body.get('provider') or ''
+        when = time_label(run.get('created_at'))
+        stamped = []
+        for message in body['messages']:
+            item = dict(message)
+            item['run_id'] = run['id']
+            item['role'] = role
+            item['provider'] = provider
+            item['when'] = when
+            stamped.append(item)
+        segments.append({'id': run['id'], 'role': role, 'provider': provider, 'when': when,
+                         'messages': stamped})
+        messages.extend(stamped)
+    return {'id': task['id'], 'runs': segments, 'messages': messages}
 
 
 def act(store, task_id, action, attempts=20):
@@ -1212,6 +1250,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.finish_json(lambda store: transcript(store.home, run_id))
             else:
                 self.finish_json(lambda store: {'text': log_text(store.home, run_id, which)})
+        elif parsed.path.startswith('/tasks/'):
+            parts = parsed.path.split('/')
+            if len(parts) != 4 or not parts[2] or parts[3] != 'transcript':
+                self.send_json({'blocked': 'not found'}, 404)
+                return
+            task_id = parts[2]
+            self.finish_json(lambda store, task_id=task_id: task_transcript(store, task_id))
         else:
             self.send_json({'blocked': 'not found'}, 404)
 
